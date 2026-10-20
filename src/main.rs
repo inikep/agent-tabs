@@ -1,9 +1,11 @@
 mod app;
+mod clipboard;
 mod composer;
 mod config;
 mod keys;
 mod pane;
 mod render;
+mod summary;
 
 use std::io::stdout;
 use std::path::PathBuf;

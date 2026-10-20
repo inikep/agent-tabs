@@ -82,12 +82,94 @@ Answer the dialog in its tab and the queued prompt follows automatically. The
 composer shows each target's state, e.g. `[x] 3 agy (dialog open)`.
 
 Tab markers: `●` the harness produced output in the last 1.5 s (it's working),
-`⧗` a prompt is queued, `✗` it exited, `!` it failed to start.
+`⧗` a prompt is queued, `?` it's waiting for your answer to a permission
+prompt (`input_patterns`), `✗` it exited, `!` it failed to start.
 
 Harnesses that run full-screen (claude, codex and agy at the time of writing)
 handle their own scrolling, so `PgUp`/`PgDn` and the mouse wheel are passed
 through to them. For inline harnesses such as cursor-agent, agent-tabs keeps up
 to `scrollback` lines of history.
+
+## Summary tab
+
+After the harness tabs comes a `Σ summary` tab (`Alt+5` with four harnesses).
+Whenever you send a prompt to two or more harnesses, agent-tabs starts a
+*round*:
+
+1. A harness counts as done once it has received the prompt, been quiet for
+   `quiet_secs`, and isn't asking you anything: no line near the bottom of its
+   screen matches `input_patterns` (permission prompts such as claude's "Do
+   you want to proceed?" or agy's "Run this command?"). A harness that exits
+   also counts as done. If a round takes longer than `wait_timeout_secs`, or
+   you press `Ctrl+R` before every harness is done, whatever is on screen is
+   used and marked as unfinished. agent-tabs keeps watching those harnesses:
+   when one finishes, its section is updated, and once every answer is
+   complete a comparison that used unfinished answers runs again.
+2. When a harness is done, agent-tabs captures its text: the screen, plus for
+   inline harnesses the scrollback since the prompt was sent, up to
+   `max_lines` lines. From that it takes the harness's final message: the
+   text after its echo of your prompt and before its input box, minus tool
+   steps (`● Bash(…)`, `• Ran …`, `⎿`/`└` output, `$ cmd`), thinking blocks and
+   timing lines. That is claude's last `●` paragraph, codex's last `•` message,
+   and agy's or cursor's closing text. It's shown straight away as that
+   harness's section, rewrapped to the tab's width.
+3. When every harness is done, agent-tabs pipes the prompt and all captures to
+   the summarizer, which writes the comparison: consensus, differences, the
+   best answer and concerns.
+
+The summarizer command is `claude --print` by default, run in a temporary
+directory so it can't read your repo. It is called once per round, for the
+comparison.
+
+Each harness gets a section with its status (`working`, `waiting for your
+answer`, `✓ done`) and its own answer, folded by default. A folded section
+shows the answer's last paragraph, which is usually the conclusion. The
+`Σ comparison` section follows, unfolded. Click a section header to fold or
+unfold it. The text has no border, so it copies cleanly.
+
+The tab marker shows the round's state: `⧗` waiting for answers, `…`
+summarizing, `●` a new summary you haven't looked at, `!` failed.
+
+The Σ tab has its own prompt box at the bottom, always active: type a prompt
+and press `Enter` to send it to every harness. You can then watch the round
+progress and read the summary without leaving the tab. The box edits like the
+composer (`Alt+Enter` for a new line, `↑`/`↓` for history, `Esc` to clear), so
+the tab's own commands use control keys:
+
+| Key (in the Σ tab) | Action |
+|---|---|
+| typing, `Enter` | Write a prompt and send it to all harnesses |
+| `Ctrl+R` | Summarize now, or re-run the round being viewed. With no rounds yet, summarizes what every harness currently shows |
+| `Ctrl+P` / `Ctrl+N` | Previous / next round |
+| `Tab` / `Shift+Tab` | Move focus between sections |
+| left click on a header, `Ctrl+O` | Fold or unfold that section (`Ctrl+O`: the focused one) |
+| `Ctrl+E` | Fold or unfold all sections |
+| `PgUp` / `PgDn`, `Ctrl+↑` / `Ctrl+↓`, mouse wheel | Scroll the summary |
+
+A new broadcast sent before the previous round finished marks that round as
+superseded; press `Ctrl+R` on it to summarize it anyway.
+
+Full-screen harnesses only expose what's on their screen, so a very long answer
+may be summarized from its last screenful.
+
+## Selecting and copying text
+
+Drag with the left mouse button in any tab to select text; it's highlighted,
+and copied when you release the button. A plain click clears the selection; in
+the `Σ` tab a click on a section header still folds it.
+
+- In harness tabs, the selection comes from the emulated terminal, so lines
+  the harness wrapped are joined back together.
+- The text goes to the system clipboard and the X11 primary selection (paste
+  with `Ctrl+Shift+V` or the middle button). It's also sent as an OSC 52
+  escape sequence, so copying works over SSH and inside tmux (with
+  `set -g set-clipboard on`) when the terminal supports it.
+- On X11 without a clipboard manager, the copied text stays available only
+  while agent-tabs is running.
+- Typing into a tab clears its selection.
+
+Set `system_clipboard = false` or `osc52 = false` to turn either target off.
+Your terminal's own selection still works with `Shift`+drag.
 
 ## Configuration
 
@@ -105,6 +187,22 @@ dialog_patterns = [
   "(?i)workspace trust required",
 ]
 
+input_patterns = [
+  "(?i)do you want to proceed\\?",
+  "(?i)requesting permission for",
+  "(?i)run this command\\?",
+  "(?i)would you like to (run|make|apply|allow)",
+]
+
+[summary]
+command = "claude"
+args = ["--print", "--model", "claude-opus-5-5"]
+auto = true
+quiet_secs = 5
+wait_timeout_secs = 900
+run_timeout_secs = 300
+max_lines = 400
+
 [[harness]]
 name = "claude"
 command = "claude"
@@ -118,7 +216,7 @@ args = ["-c", "model_reasoning_effort=\"high\""]
 [[harness]]
 name = "agy"
 command = "agy"
-args = ["--model", "gemini-4-argon", "--effort", "high", "--mode", "accept-edits"]
+args = ["--model", "gemini-4-argon", "--effort", "high", "--mode", "auto"]
 
 [[harness]]
 name = "cursor"
@@ -140,12 +238,12 @@ With `--log-dir DIR`, agent-tabs writes:
   terminal of the same size to replay it.
 - `DIR/prompts.log`: every prompt sent from the composer, with a timestamp and
   its targets.
+- `DIR/summaries.log`: every summary, with the prompt it summarizes.
 
 ## Notes
 
-- Mouse capture is on by default so the wheel and clicks on tabs work. Most
-  terminals still select text with `Shift`+drag; set `mouse = false` to turn
-  capture off.
+- Mouse capture is on by default so the wheel, clicks on tabs and text
+  selection work. Set `mouse = false` to turn capture off.
 - Colour queries (OSC 10/11) are answered with a dark-background palette.
 - On quit or restart, each harness's process group receives `SIGHUP`, as when a
   terminal window closes. Whatever is still running after 1.5 s gets `SIGKILL`.

@@ -7,6 +7,9 @@ use std::time::{Duration, Instant};
 use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Column, Line, Point, Side};
+use alacritty_terminal::selection::{Selection, SelectionType};
+use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config as TermConfig, TermMode};
 use alacritty_terminal::vte::ansi::{Processor, Rgb};
 use anyhow::{Context, Result};
@@ -366,6 +369,17 @@ impl Pane {
         }
     }
 
+    pub fn screen_tail(&self, lines: usize) -> String {
+        let text = self.screen_text();
+        let all: Vec<&str> = text.lines().map(str::trim_end).collect();
+        let end = all
+            .iter()
+            .rposition(|l| !l.is_empty())
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        all[end.saturating_sub(lines)..end].join("\n")
+    }
+
     pub fn screen_text(&self) -> String {
         let Ok(term) = self.term.lock() else {
             return String::new();
@@ -381,6 +395,92 @@ impl Pane {
             text.push(cell.c);
         }
         text
+    }
+
+    fn point_at(term: &Term<Listener>, col: u16, row: u16) -> Point {
+        let offset = term.grid().display_offset() as i32;
+        let row = (row as usize).min(term.screen_lines().saturating_sub(1)) as i32;
+        let col = (col as usize).min(term.columns().saturating_sub(1));
+        Point::new(Line(row - offset), Column(col))
+    }
+
+    pub fn start_selection(&self, col: u16, row: u16) {
+        if let Ok(mut term) = self.term.lock() {
+            let point = Self::point_at(&term, col, row);
+            term.selection = Some(Selection::new(SelectionType::Simple, point, Side::Left));
+        }
+    }
+
+    pub fn update_selection(&self, col: u16, row: u16) {
+        if let Ok(mut term) = self.term.lock() {
+            let point = Self::point_at(&term, col, row);
+            if let Some(selection) = term.selection.as_mut() {
+                selection.update(point, Side::Right);
+            }
+        }
+    }
+
+    pub fn clear_selection(&self) {
+        if let Ok(mut term) = self.term.lock() {
+            term.selection = None;
+        }
+    }
+
+    pub fn selection_text(&self) -> Option<String> {
+        let term = self.term.lock().ok()?;
+        term.selection_to_string()
+            .filter(|text| !text.trim().is_empty())
+    }
+
+    pub fn history_mark(&self) -> usize {
+        self.term
+            .lock()
+            .map(|t| t.grid().history_size())
+            .unwrap_or(0)
+    }
+
+    pub fn text_since(&self, mark: usize, max_lines: usize) -> String {
+        let Ok(term) = self.term.lock() else {
+            return String::new();
+        };
+        let grid = term.grid();
+        let history = grid.history_size();
+        let back = history.saturating_sub(mark).min(history) as i32;
+        let columns = grid.columns();
+        let mut lines: Vec<String> = Vec::new();
+        for line in -back..grid.screen_lines() as i32 {
+            let row = &grid[Line(line)];
+            let mut text = String::new();
+            for col in 0..columns {
+                let cell = &row[Column(col)];
+                if cell
+                    .flags
+                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                {
+                    continue;
+                }
+                text.push(cell.c);
+                if let Some(extra) = cell.zerowidth() {
+                    text.extend(extra);
+                }
+            }
+            lines.push(text.trim_end().to_string());
+        }
+        let mut compact: Vec<String> = Vec::new();
+        for line in lines {
+            if line.is_empty() && compact.last().is_some_and(|l: &String| l.is_empty()) {
+                continue;
+            }
+            compact.push(line);
+        }
+        while compact.last().is_some_and(String::is_empty) {
+            compact.pop();
+        }
+        while compact.first().is_some_and(String::is_empty) {
+            compact.remove(0);
+        }
+        let skip = compact.len().saturating_sub(max_lines);
+        compact[skip..].join("\n")
     }
 
     pub fn ready_for_prompt(&self) -> bool {
@@ -696,6 +796,30 @@ mod tests {
         }
         assert!(panes[0].has_exited());
         let _ = std::fs::remove_file(marker);
+    }
+
+    #[test]
+    fn text_since_mark_includes_scrolled_history() {
+        let pane = spawn("seq 1 30; echo MARK; sleep 0.5; seq 100 140; sleep 2");
+        wait_for(&pane, |p| screen_text(p).contains("MARK"));
+        let mark = pane.history_mark();
+        wait_for(&pane, |p| screen_text(p).contains("140"));
+        let text = pane.text_since(mark, 1000);
+        assert!(text.contains("100") && text.ends_with("140"), "{text}");
+        assert!(!text.contains("\n5\n"), "{text}");
+        let tail = pane.text_since(mark, 3);
+        assert_eq!(tail, "138\n139\n140");
+    }
+
+    #[test]
+    fn selection_returns_text_across_lines() {
+        let pane = spawn("printf 'first line\\r\\nsecond line'; sleep 2");
+        wait_for(&pane, |p| screen_text(p).contains("second line"));
+        pane.start_selection(6, 0);
+        pane.update_selection(5, 1);
+        assert_eq!(pane.selection_text().unwrap(), "line\nsecond");
+        pane.clear_selection();
+        assert!(pane.selection_text().is_none());
     }
 
     #[test]

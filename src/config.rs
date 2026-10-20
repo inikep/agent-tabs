@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::summary::SummaryConfig;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Harness {
     pub name: String,
@@ -24,8 +26,16 @@ pub struct Config {
     pub scrollback: usize,
     #[serde(default = "default_mouse")]
     pub mouse: bool,
+    #[serde(default = "default_osc52")]
+    pub osc52: bool,
+    #[serde(default = "default_osc52")]
+    pub system_clipboard: bool,
     #[serde(default = "default_dialog_patterns")]
     pub dialog_patterns: Vec<String>,
+    #[serde(default = "default_input_patterns")]
+    pub input_patterns: Vec<String>,
+    #[serde(default)]
+    pub summary: SummaryConfig,
     #[serde(rename = "harness", default = "default_harnesses")]
     pub harnesses: Vec<Harness>,
 }
@@ -40,6 +50,26 @@ fn default_scrollback() -> usize {
 
 fn default_mouse() -> bool {
     true
+}
+
+fn default_osc52() -> bool {
+    true
+}
+
+pub fn default_input_patterns() -> Vec<String> {
+    [
+        r"(?i)do you want to proceed\?",
+        r"(?i)do you want to (make this edit|create|allow|run)",
+        r"(?i)esc to cancel · tab to amend",
+        r"(?i)requesting permission for",
+        r"(?i)run this command\?",
+        r"(?i)would you like to (run|make|apply|allow)",
+        r"(?i)allow (this )?(command|tool|edit)\?",
+        r"(?i)\(y/n\)",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 pub fn default_dialog_patterns() -> Vec<String> {
@@ -84,7 +114,11 @@ impl Default for Config {
             submit_delay_ms: default_submit_delay_ms(),
             scrollback: default_scrollback(),
             mouse: default_mouse(),
+            osc52: default_osc52(),
+            system_clipboard: default_osc52(),
             dialog_patterns: default_dialog_patterns(),
+            input_patterns: default_input_patterns(),
+            summary: SummaryConfig::default(),
             harnesses: default_harnesses(),
         }
     }
@@ -117,6 +151,7 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         anyhow::ensure!(!self.harnesses.is_empty(), "config defines no harnesses");
         self.dialog_regex()?;
+        self.input_regex()?;
         let mut seen = std::collections::HashSet::new();
         for h in &self.harnesses {
             anyhow::ensure!(!h.name.trim().is_empty(), "harness with empty name");
@@ -157,6 +192,10 @@ impl Config {
         regex::RegexSet::new(&self.dialog_patterns).context("invalid dialog_patterns")
     }
 
+    pub fn input_regex(&self) -> Result<regex::RegexSet> {
+        regex::RegexSet::new(&self.input_patterns).context("invalid input_patterns")
+    }
+
     pub fn to_toml(&self) -> String {
         toml::to_string_pretty(self).expect("config serializes")
     }
@@ -195,6 +234,19 @@ mod tests {
     }
 
     #[test]
+    fn summary_section_overrides_defaults() {
+        let parsed: Config = toml::from_str(
+            "[summary]\ncommand = \"codex\"\nargs = [\"exec\", \"-\"]\nauto = false\n",
+        )
+        .unwrap();
+        assert_eq!(parsed.summary.command, "codex");
+        assert_eq!(parsed.summary.args, ["exec", "-"]);
+        assert!(!parsed.summary.auto);
+        assert_eq!(parsed.summary.quiet_secs, 5);
+        assert_eq!(parsed.harnesses.len(), 4);
+    }
+
+    #[test]
     fn select_filters_and_rejects_unknown() {
         let mut config = Config::default();
         config.select(&["codex".into(), "agy".into()]).unwrap();
@@ -214,6 +266,22 @@ mod tests {
             assert!(set.is_match(text), "{text}");
         }
         assert!(!set.is_match("› Ask Codex to do anything"));
+    }
+
+    #[test]
+    fn default_input_patterns_match_known_permission_prompts() {
+        let set = Config::default().input_regex().unwrap();
+        for text in [
+            " Do you want to proceed?\n ❯ 1. Yes\n   4. No\n Esc to cancel · Tab to amend",
+            "Requesting permission for:\n   mkdir -p x\nRun this command?\n> 1. Yes, run command",
+            "Would you like to run the following command?",
+            "Overwrite file? (y/n)",
+        ] {
+            assert!(set.is_match(text), "{text}");
+        }
+        for text in ["› Ask Codex to do anything", "• DONE.", "→ Add a follow-up"] {
+            assert!(!set.is_match(text), "{text}");
+        }
     }
 
     #[test]

@@ -2,6 +2,12 @@ submit_delay_ms = 150
 scrollback = 20000
 mouse = true
 
+[summary]
+command = "claude"
+args = ["--print"]
+auto = true
+quiet_secs = 5
+
 [[harness]]
 name = "claude"
 command = "claude"
@@ -17,7 +23,7 @@ env_remove = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_CHILD_SESSION
 [[harness]]
 name = "agy"
 command = "agy"
-args = ["--model", "gemini-4-argon", "--effort", "high"]
+args = ["--model", "gemini-4-argon", "--effort", "high", "--mode", "auto"]
 env_remove = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_CHILD_SESSION"]
 
 [[harness]]

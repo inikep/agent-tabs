@@ -56,6 +56,16 @@ impl Composer {
         }
     }
 
+    pub fn select_all(&mut self) {
+        self.targets.iter_mut().for_each(|t| *t = true);
+    }
+
+    pub fn clear(&mut self) {
+        self.text.clear();
+        self.cursor = 0;
+        self.history_pos = None;
+    }
+
     pub fn toggle_all(&mut self) {
         let all = self.targets.iter().all(|t| *t);
         self.targets.iter_mut().for_each(|t| *t = !all);

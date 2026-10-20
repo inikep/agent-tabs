@@ -114,7 +114,18 @@ pub fn draw_term<T: EventListener>(
             symbol.extend(extra);
         }
         target.set_symbol(&symbol);
-        target.set_style(cell_style(cell.fg, cell.bg, cell.flags, content.colors));
+        let mut style = cell_style(cell.fg, cell.bg, cell.flags, content.colors);
+        if content
+            .selection
+            .is_some_and(|range| range.contains(indexed.point))
+        {
+            style = if style.add_modifier.contains(Modifier::REVERSED) {
+                style.remove_modifier(Modifier::REVERSED)
+            } else {
+                style.add_modifier(Modifier::REVERSED)
+            };
+        }
+        target.set_style(style);
     }
 
     let cursor = content.cursor.point;
@@ -186,6 +197,30 @@ mod tests {
     fn alternate_screen_content_is_drawn() {
         let (buf, _) = render(b"main\x1b[?1049h\x1b[Halt", Size { cols: 6, rows: 2 });
         assert_eq!(row(&buf, 0), "alt");
+    }
+
+    #[test]
+    fn selected_cells_are_drawn_reversed() {
+        let size = Size { cols: 6, rows: 1 };
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut term, b"abcdef");
+        use alacritty_terminal::index::{Column, Line, Point, Side};
+        use alacritty_terminal::selection::{Selection, SelectionType};
+        let mut selection = Selection::new(
+            SelectionType::Simple,
+            Point::new(Line(0), Column(1)),
+            Side::Left,
+        );
+        selection.update(Point::new(Line(0), Column(2)), Side::Right);
+        term.selection = Some(selection);
+        let area = Rect::new(0, 0, 6, 1);
+        let mut buf = Buffer::empty(area);
+        draw_term(&term, area, &mut buf);
+        assert!(!buf[(0, 0)].modifier.contains(Modifier::REVERSED));
+        assert!(buf[(1, 0)].modifier.contains(Modifier::REVERSED));
+        assert!(buf[(2, 0)].modifier.contains(Modifier::REVERSED));
+        assert!(!buf[(3, 0)].modifier.contains(Modifier::REVERSED));
     }
 
     #[test]
