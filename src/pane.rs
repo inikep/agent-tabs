@@ -366,6 +366,27 @@ impl Pane {
         }
     }
 
+    pub fn screen_text(&self) -> String {
+        let Ok(term) = self.term.lock() else {
+            return String::new();
+        };
+        let content = term.renderable_content();
+        let mut text = String::new();
+        let mut last_line = None;
+        for cell in content.display_iter {
+            if last_line.is_some_and(|line| line != cell.point.line) {
+                text.push('\n');
+            }
+            last_line = Some(cell.point.line);
+            text.push(cell.c);
+        }
+        text
+    }
+
+    pub fn ready_for_prompt(&self) -> bool {
+        matches!(self.status(), Status::Running) && self.mode().contains(TermMode::BRACKETED_PASTE)
+    }
+
     pub fn paste(&self, text: &str) {
         let bracketed = self.mode().contains(TermMode::BRACKETED_PASTE);
         self.write(&bracketed_paste(text, bracketed));

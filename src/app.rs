@@ -51,7 +51,17 @@ pub struct App {
     pane_size: Size,
     tab_spans: Vec<(u16, u16)>,
     message: Option<(String, Instant)>,
+    pending: Vec<(usize, String)>,
+    dialogs: regex::RegexSet,
     quit: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Readiness {
+    Ready,
+    NoPaste,
+    Dialog,
+    NotRunning,
 }
 
 pub fn is_prefix(key: &KeyEvent) -> bool {
@@ -85,8 +95,11 @@ impl App {
             pane_size,
             tab_spans: Vec::new(),
             message: None,
+            pending: Vec::new(),
+            dialogs: regex::RegexSet::empty(),
             quit: false,
         };
+        app.dialogs = app.config.dialog_regex()?;
         let harnesses = app.config.harnesses.clone();
         for harness in harnesses {
             let pane = app.spawn_pane(harness);
@@ -144,6 +157,53 @@ impl App {
         self.message = Some((text.into(), Instant::now()));
     }
 
+    pub fn deliver_pending(&mut self) {
+        if self.pending.is_empty() {
+            return;
+        }
+        let delay = Duration::from_millis(self.config.submit_delay_ms);
+        let mut delivered = Vec::new();
+        let mut dropped = Vec::new();
+        let mut waiting = Vec::new();
+        for (i, text) in std::mem::take(&mut self.pending) {
+            match self.readiness(i) {
+                Readiness::Ready => {
+                    self.panes[i].send_prompt(&text, delay);
+                    delivered.push(self.panes[i].name().to_string());
+                }
+                Readiness::NotRunning => dropped.push(self.panes[i].name().to_string()),
+                Readiness::NoPaste | Readiness::Dialog => waiting.push((i, text)),
+            }
+        }
+        self.pending = waiting;
+        if !delivered.is_empty() {
+            self.flash(format!("sent queued prompt to {}", delivered.join(", ")));
+        }
+        if !dropped.is_empty() {
+            self.flash(format!(
+                "dropped queued prompt: {} is not running",
+                dropped.join(", ")
+            ));
+        }
+    }
+
+    fn readiness(&self, index: usize) -> Readiness {
+        let pane = &self.panes[index];
+        if !matches!(pane.status(), Status::Running) {
+            Readiness::NotRunning
+        } else if !pane.ready_for_prompt() {
+            Readiness::NoPaste
+        } else if self.dialogs.is_match(&pane.screen_text()) {
+            Readiness::Dialog
+        } else {
+            Readiness::Ready
+        }
+    }
+
+    fn has_pending(&self, index: usize) -> bool {
+        self.pending.iter().any(|(i, _)| *i == index)
+    }
+
     pub fn shutdown(&mut self) {
         crate::pane::shutdown(&mut self.panes, SHUTDOWN_GRACE);
     }
@@ -152,6 +212,10 @@ impl App {
         let mut last_tick = Instant::now();
         let mut redraw = true;
         while !self.quit {
+            if !self.pending.is_empty() {
+                self.deliver_pending();
+                redraw = true;
+            }
             if redraw || self.dirty.swap(false, Ordering::AcqRel) {
                 terminal.draw(|frame| self.draw(frame))?;
                 redraw = false;
@@ -296,6 +360,14 @@ impl App {
                 _ => self.restart_active(),
             },
             KeyCode::Char('q') => self.mode = Mode::ConfirmQuit,
+            KeyCode::Char('x') => {
+                let before = self.pending.len();
+                let active = self.active;
+                self.pending.retain(|(i, _)| *i != active);
+                let removed = before - self.pending.len();
+                let name = self.panes[active].name().to_string();
+                self.flash(format!("cancelled {removed} queued prompt(s) for {name}"));
+            }
             KeyCode::Char('?') | KeyCode::Char('h') => self.mode = Mode::Help,
             _ => {}
         }
@@ -311,13 +383,26 @@ impl App {
             ComposerAction::Cancel => self.mode = Mode::Normal,
             ComposerAction::Submit { text, targets } => {
                 let delay = Duration::from_millis(self.config.submit_delay_ms);
+                let mut sent = Vec::new();
+                let mut queued = Vec::new();
                 for &i in &targets {
-                    self.panes[i].send_prompt(&text, delay);
+                    if self.readiness(i) == Readiness::Ready {
+                        self.panes[i].send_prompt(&text, delay);
+                        sent.push(self.panes[i].name().to_string());
+                    } else {
+                        self.pending.push((i, text.clone()));
+                        queued.push(self.panes[i].name().to_string());
+                    }
                 }
                 self.log_prompt(&text, &targets);
-                let names: Vec<&str> = targets.iter().map(|&i| self.panes[i].name()).collect();
-                let summary = format!("sent to {}", names.join(", "));
-                self.flash(summary);
+                let mut summary = Vec::new();
+                if !sent.is_empty() {
+                    summary.push(format!("sent to {}", sent.join(", ")));
+                }
+                if !queued.is_empty() {
+                    summary.push(format!("queued for {} until ready", queued.join(", ")));
+                }
+                self.flash(summary.join("; "));
                 self.mode = Mode::Normal;
             }
         }
@@ -408,6 +493,7 @@ impl App {
     fn tab_label(&self, index: usize) -> (String, Style) {
         let pane = &self.panes[index];
         let (marker, color) = match pane.status() {
+            Status::Running if self.has_pending(index) => (" ⧗", Color::Yellow),
             Status::Running if pane.is_busy(BUSY_WINDOW) => (" ●", Color::Green),
             Status::Running => ("", Color::Reset),
             Status::Exited(_) => (" ✗", Color::Red),
@@ -563,10 +649,16 @@ impl App {
         for (i, pane) in self.panes.iter().enumerate() {
             let on = self.composer.targets[i];
             let label = format!(
-                "[{}] {} {} ",
+                "[{}] {} {}{} ",
                 if on { "x" } else { " " },
                 i + 1,
-                pane.name()
+                pane.name(),
+                match self.readiness(i) {
+                    Readiness::Ready => "",
+                    Readiness::NoPaste => " (starting)",
+                    Readiness::Dialog => " (dialog open)",
+                    Readiness::NotRunning => " (not running)",
+                }
             );
             title.push(if on {
                 Span::raw(label).cyan().bold()
@@ -614,6 +706,7 @@ impl App {
             Line::from("  s / Enter    compose a prompt for this harness"),
             Line::from("  [ / PgUp     scroll back  (also Shift+PgUp, mouse wheel)"),
             Line::from("  r            restart this harness"),
+            Line::from("  x            cancel prompts queued for this harness"),
             Line::from("  q            quit (stops all harnesses)"),
             Line::from("  Ctrl+\\       send a literal Ctrl+\\ to the harness"),
             Line::from(""),
@@ -621,7 +714,9 @@ impl App {
             Line::from("  Enter send · Alt+Enter / Ctrl+J newline · Alt+1-9 toggle target"),
             Line::from("  Ctrl+A toggle all · ↑/↓ history · Esc cancel"),
             Line::from(""),
-            Line::from("Tab markers: ● producing output · ✗ exited · ! failed to start"),
+            Line::from("Tab markers: ● producing output · ⧗ prompt queued · ✗ exited · ! failed"),
+            Line::from("A prompt waits in the queue while its harness is starting or shows a"),
+            Line::from("dialog such as a folder-trust prompt, and is sent once it's at its input."),
             Line::from(""),
             Line::from("Press any key to close.").dark_gray(),
         ];
@@ -662,17 +757,111 @@ mod tests {
     use std::collections::BTreeMap;
     use std::thread;
 
-    fn cat_harness(name: &str) -> Harness {
+    fn script_harness(name: &str, script: &str) -> Harness {
         Harness {
             name: name.into(),
             command: "sh".into(),
-            args: vec![
-                "-c".into(),
-                "stty -echo; while read l; do printf 'got:%s\\r\\n' \"$l\"; done".into(),
-            ],
+            args: vec!["-c".into(), script.into()],
             env: BTreeMap::new(),
             env_remove: Vec::new(),
         }
+    }
+
+    const ECHO_LOOP: &str = "stty -echo; while read l; do printf 'got:%s\\r\\n' \"$l\"; done";
+
+    fn cat_harness(name: &str) -> Harness {
+        script_harness(name, &format!("printf '\\033[?2004h'; {ECHO_LOOP}"))
+    }
+
+    fn app_with(harnesses: Vec<Harness>) -> App {
+        let config = Config {
+            submit_delay_ms: 30,
+            scrollback: 100,
+            mouse: true,
+            dialog_patterns: crate::config::default_dialog_patterns(),
+            harnesses,
+        };
+        App::new(
+            config,
+            PathBuf::from("."),
+            None,
+            Size { cols: 60, rows: 12 },
+        )
+        .unwrap()
+    }
+
+    fn wait_until(app: &mut App, mut done: impl FnMut(&App) -> bool) {
+        let start = Instant::now();
+        while !done(app) {
+            assert!(start.elapsed() < Duration::from_secs(10), "timed out");
+            app.deliver_pending();
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn compose_all(app: &mut App, text: &str) {
+        app.handle_event(key(KeyCode::Char('\\'), KeyModifiers::CONTROL));
+        app.handle_event(key(KeyCode::Char('a'), KeyModifiers::NONE));
+        type_text(app, text);
+        app.handle_event(key(KeyCode::Enter, KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn prompt_waits_until_harness_accepts_paste() {
+        let late = format!("sleep 0.6; printf '\\033[?2004h'; {ECHO_LOOP}");
+        let mut app = app_with(vec![cat_harness("ready"), script_harness("late", &late)]);
+        thread::sleep(Duration::from_millis(200));
+        compose_all(&mut app, "hello");
+        assert!(app.has_pending(1));
+        assert!(!app.has_pending(0));
+        wait_for(app.pane(0), "got:hello");
+        assert!(
+            !screen(app.pane(1)).contains("hello"),
+            "prompt typed before the harness was ready"
+        );
+        wait_until(&mut app, |a| !a.has_pending(1));
+        wait_for(app.pane(1), "got:hello");
+    }
+
+    #[test]
+    fn prompt_waits_while_a_trust_dialog_is_shown() {
+        let dialog = format!(
+            "printf '\\033[?2004hDo you trust the contents of this project?'; sleep 0.6; printf '\\033[2J\\033[H'; {ECHO_LOOP}"
+        );
+        let mut app = app_with(vec![script_harness("dialog", &dialog)]);
+        wait_for(app.pane(0), "Do you trust");
+        compose_all(&mut app, "after");
+        assert!(app.has_pending(0));
+        assert_eq!(app.readiness(0), Readiness::Dialog);
+        wait_until(&mut app, |a| !a.has_pending(0));
+        wait_for(app.pane(0), "got:after");
+    }
+
+    #[test]
+    fn prompt_is_never_typed_as_keystrokes() {
+        let mut app = app_with(vec![script_harness("raw", ECHO_LOOP)]);
+        thread::sleep(Duration::from_millis(200));
+        compose_all(&mut app, "quit");
+        thread::sleep(Duration::from_millis(300));
+        app.deliver_pending();
+        assert!(app.has_pending(0));
+        assert!(!screen(app.pane(0)).contains("got:"));
+    }
+
+    #[test]
+    fn queued_prompt_can_be_cancelled_and_is_dropped_on_exit() {
+        let mut app = app_with(vec![
+            script_harness("raw", ECHO_LOOP),
+            script_harness("gone", "sleep 0.4"),
+        ]);
+        thread::sleep(Duration::from_millis(100));
+        compose_all(&mut app, "x");
+        assert!(app.has_pending(0) && app.has_pending(1));
+        app.handle_event(key(KeyCode::Char('\\'), KeyModifiers::CONTROL));
+        app.handle_event(key(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(!app.has_pending(0));
+        wait_until(&mut app, |a| !a.has_pending(1));
+        assert!(matches!(app.pane(1).status(), Status::Exited(_)));
     }
 
     fn app(names: &[&str]) -> App {
@@ -680,6 +869,7 @@ mod tests {
             submit_delay_ms: 30,
             scrollback: 100,
             mouse: true,
+            dialog_patterns: crate::config::default_dialog_patterns(),
             harnesses: names.iter().map(|n| cat_harness(n)).collect(),
         };
         App::new(
@@ -800,6 +990,7 @@ mod tests {
             submit_delay_ms: 10,
             scrollback: 100,
             mouse: true,
+            dialog_patterns: crate::config::default_dialog_patterns(),
             harnesses: vec![cat_harness("a")],
         };
         let mut app = App::new(

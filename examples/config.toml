@@ -6,21 +6,21 @@ mouse = true
 name = "claude"
 command = "claude"
 args = ["--model", "claude-opus-5-5"]
-env_remove = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]
+env_remove = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_CHILD_SESSION"]
 
 [[harness]]
 name = "codex"
 command = "codex"
 args = ["-c", "model_reasoning_effort=\"high\""]
-env_remove = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]
+env_remove = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_CHILD_SESSION"]
 
 [[harness]]
 name = "agy"
 command = "agy"
 args = ["--model", "gemini-4-argon", "--effort", "high"]
-env_remove = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]
+env_remove = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_CHILD_SESSION"]
 
 [[harness]]
 name = "cursor"
 command = "cursor-agent"
-env_remove = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]
+env_remove = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_CHILD_SESSION"]

@@ -12,6 +12,7 @@ dependencies = [
  "libc",
  "portable-pty",
  "ratatui",
+ "regex",
  "serde",
  "toml",
  "unicode-width",

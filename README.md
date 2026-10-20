@@ -47,6 +47,7 @@ intercepts its prefix key, `Ctrl+\`, and `Alt+1`…`Alt+9`.
 | `Ctrl+\` `s` (or `Enter`) | Compose a prompt for the **current** harness |
 | `Ctrl+\` `[` (or `PgUp`), `Shift+PgUp`, mouse wheel | Scroll back through a tab's history |
 | `Ctrl+\` `r` | Restart the current harness |
+| `Ctrl+\` `x` | Cancel prompts queued for the current harness |
 | `Ctrl+\` `q` | Quit, stopping every harness |
 | `Ctrl+\` `?` | Help |
 | `Ctrl+\` `Ctrl+\` | Send a literal `Ctrl+\` to the harness |
@@ -67,8 +68,21 @@ A composed prompt is sent to each target as a bracketed paste, so a multi-line
 prompt arrives as one message. After `submit_delay_ms` agent-tabs presses
 `Enter` for you.
 
+A prompt is only sent to a harness that is at its input box. Until then it
+waits in a queue, and the tab shows `⧗`:
+
+- **Starting:** the harness hasn't enabled bracketed paste yet. Prompts are
+  never typed as individual keystrokes, because single keys are actions in some
+  dialogs (`q` quits cursor-agent's trust dialog).
+- **Dialog open:** the screen matches one of `dialog_patterns`, by default the
+  folder-trust dialogs of claude, codex, agy and cursor-agent. Without this, the
+  final `Enter` would answer the dialog; for claude that can mean "No, exit".
+
+Answer the dialog in its tab and the queued prompt follows automatically. The
+composer shows each target's state, e.g. `[x] 3 agy (dialog open)`.
+
 Tab markers: `●` the harness produced output in the last 1.5 s (it's working),
-`✗` it exited, `!` it failed to start.
+`⧗` a prompt is queued, `✗` it exited, `!` it failed to start.
 
 Harnesses that run full-screen (claude, codex and agy at the time of writing)
 handle their own scrolling, so `PgUp`/`PgDn` and the mouse wheel are passed
@@ -84,6 +98,12 @@ Optional: `~/.config/agent-tabs/config.toml`, or pass `--config FILE`.
 submit_delay_ms = 150
 scrollback = 20000
 mouse = true
+dialog_patterns = [
+  "(?i)quick safety check",
+  "(?i)trust this folder\\?",
+  "(?i)do you trust the contents",
+  "(?i)workspace trust required",
+]
 
 [[harness]]
 name = "claude"
@@ -98,7 +118,7 @@ args = ["-c", "model_reasoning_effort=\"high\""]
 [[harness]]
 name = "agy"
 command = "agy"
-args = ["--model", "gemini-4-argon", "--effort", "high"]
+args = ["--model", "gemini-4-argon", "--effort", "high", "--mode", "accept-edits"]
 
 [[harness]]
 name = "cursor"

@@ -24,6 +24,8 @@ pub struct Config {
     pub scrollback: usize,
     #[serde(default = "default_mouse")]
     pub mouse: bool,
+    #[serde(default = "default_dialog_patterns")]
+    pub dialog_patterns: Vec<String>,
     #[serde(rename = "harness", default = "default_harnesses")]
     pub harnesses: Vec<Harness>,
 }
@@ -40,6 +42,19 @@ fn default_mouse() -> bool {
     true
 }
 
+pub fn default_dialog_patterns() -> Vec<String> {
+    [
+        r"(?i)quick safety check",
+        r"(?i)is this a project you created or one you trust",
+        r"(?i)trust this folder\?",
+        r"(?i)do you trust the contents",
+        r"(?i)workspace trust required",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
 fn harness(name: &str, command: &str) -> Harness {
     Harness {
         name: name.to_string(),
@@ -49,6 +64,7 @@ fn harness(name: &str, command: &str) -> Harness {
         env_remove: vec![
             "CLAUDECODE".to_string(),
             "CLAUDE_CODE_ENTRYPOINT".to_string(),
+            "CLAUDE_CODE_CHILD_SESSION".to_string(),
         ],
     }
 }
@@ -68,6 +84,7 @@ impl Default for Config {
             submit_delay_ms: default_submit_delay_ms(),
             scrollback: default_scrollback(),
             mouse: default_mouse(),
+            dialog_patterns: default_dialog_patterns(),
             harnesses: default_harnesses(),
         }
     }
@@ -99,6 +116,7 @@ impl Config {
 
     pub fn validate(&self) -> Result<()> {
         anyhow::ensure!(!self.harnesses.is_empty(), "config defines no harnesses");
+        self.dialog_regex()?;
         let mut seen = std::collections::HashSet::new();
         for h in &self.harnesses {
             anyhow::ensure!(!h.name.trim().is_empty(), "harness with empty name");
@@ -133,6 +151,10 @@ impl Config {
         }
         self.harnesses.retain(|h| only.contains(&h.name));
         Ok(())
+    }
+
+    pub fn dialog_regex(&self) -> Result<regex::RegexSet> {
+        regex::RegexSet::new(&self.dialog_patterns).context("invalid dialog_patterns")
     }
 
     pub fn to_toml(&self) -> String {
@@ -178,6 +200,27 @@ mod tests {
         config.select(&["codex".into(), "agy".into()]).unwrap();
         assert_eq!(config.harnesses.len(), 2);
         assert!(Config::default().select(&["nope".into()]).is_err());
+    }
+
+    #[test]
+    fn default_dialog_patterns_match_known_trust_dialogs() {
+        let set = Config::default().dialog_regex().unwrap();
+        for text in [
+            "Quick safety check: Is this a project you created or one you trust?",
+            "Trust this folder? Codex can read, edit, and run files here",
+            "Do you trust the contents of this project?",
+            "⚠ Workspace Trust Required",
+        ] {
+            assert!(set.is_match(text), "{text}");
+        }
+        assert!(!set.is_match("› Ask Codex to do anything"));
+    }
+
+    #[test]
+    fn invalid_dialog_pattern_is_rejected() {
+        let mut config = Config::default();
+        config.dialog_patterns.push("(".into());
+        assert!(config.validate().is_err());
     }
 
     #[test]
