@@ -1,0 +1,26 @@
+submit_delay_ms = 150
+scrollback = 20000
+mouse = true
+
+[[harness]]
+name = "claude"
+command = "claude"
+args = ["--model", "claude-opus-5-5"]
+env_remove = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]
+
+[[harness]]
+name = "codex"
+command = "codex"
+args = ["-c", "model_reasoning_effort=\"high\""]
+env_remove = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]
+
+[[harness]]
+name = "agy"
+command = "agy"
+args = ["--model", "gemini-4-argon", "--effort", "high"]
+env_remove = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]
+
+[[harness]]
+name = "cursor"
+command = "cursor-agent"
+env_remove = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]
