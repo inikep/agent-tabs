@@ -48,7 +48,7 @@ intercepts its prefix key, `Ctrl+\`, and `Alt+1`…`Alt+9`.
 | `Ctrl+\` `[` (or `PgUp`), `Shift+PgUp`, mouse wheel | Scroll back through a tab's history |
 | `Ctrl+\` `r` | Restart the current harness |
 | `Ctrl+\` `x` | Cancel prompts queued for the current harness |
-| `Ctrl+\` `q` | Quit, stopping every harness |
+| `Ctrl+\` `q`, or click `✕ exit` (top right) | Quit, stopping every harness. It asks first; press `y` or click `✕ exit` again |
 | `Ctrl+\` `?` | Help |
 | `Ctrl+\` `Ctrl+\` | Send a literal `Ctrl+\` to the harness |
 
@@ -58,7 +58,7 @@ In the prompt composer:
 |---|---|
 | `Enter` | Send to every checked target |
 | `Alt+Enter`, `Shift+Enter`, `Ctrl+J` | New line |
-| `Alt+1`…`Alt+9` | Toggle target N (`Alt+0` toggles all) |
+| `Alt+1`…`Alt+9`, or click `[x] name` in the title | Toggle target N (`Alt+0` toggles all) |
 | `Ctrl+A` | Toggle all targets |
 | `↑` / `↓` | Move between lines; past the first or last line, step through prompt history |
 | `Ctrl+U` / `Ctrl+K` / `Ctrl+W` | Delete to line start / line end / previous word |
@@ -79,7 +79,7 @@ waits in a queue, and the tab shows `⧗`:
   final `Enter` would answer the dialog; for claude that can mean "No, exit".
 
 Answer the dialog in its tab and the queued prompt follows automatically. The
-composer shows each target's state, e.g. `[x] 3 agy (dialog open)`.
+composer shows each target's state, e.g. `[x] agy (dialog open)`.
 
 Tab markers: `●` the harness produced output in the last 1.5 s (it's working),
 `⧗` a prompt is queued, `?` it's waiting for your answer to a permission
@@ -92,7 +92,7 @@ to `scrollback` lines of history.
 
 ## Summary tab
 
-After the harness tabs comes a `Σ summary` tab (`Alt+5` with four harnesses).
+After the harness tabs comes a `summary` tab (`Alt+5` with four harnesses).
 Whenever you send a prompt to two or more harnesses, agent-tabs starts a
 *round*:
 
@@ -121,22 +121,34 @@ The summarizer command is `claude --print` by default, run in a temporary
 directory so it can't read your repo. It is called once per round, for the
 comparison.
 
+Each section header names the harness, its model and the provider, e.g.
+`muse-wonder · Muse Wonder 300K High (Cursor)`. The model is read from the
+harness's own status line or banner when its answer is captured, and the label
+is passed to the comparison too. The provider defaults to the harness (Claude
+Code, Codex, Antigravity, Cursor, OpenCode). Per harness you can set
+`model = "..."` and `provider = "..."`, or teach agent-tabs a new status line
+with `model_patterns = ["regex with (capture groups)"]`; a group named
+`provider` is used as the provider.
+
 Each harness gets a section with its status (`working`, `waiting for your
 answer`, `✓ done`) and its own answer, folded by default. A folded section
 shows the answer's last paragraph, which is usually the conclusion. The
-`Σ comparison` section follows, unfolded. Click a section header to fold or
+`comparison` section follows, unfolded. Click a section header to fold or
 unfold it. The text has no border, so it copies cleanly.
 
 The tab marker shows the round's state: `⧗` waiting for answers, `…`
 summarizing, `●` a new summary you haven't looked at, `!` failed.
 
-The Σ tab has its own prompt box at the bottom, always active: type a prompt
-and press `Enter` to send it to every harness. You can then watch the round
+The summary tab has its own prompt box at the bottom, always active: type a prompt
+and press `Enter` to send it to every ticked harness. All are ticked at first;
+click a `[x] name` label in the box's title to untick or tick one, and the
+choice is kept for later prompts. `[x]` only means "send to this harness"; the
+tab markers show whether a harness is working. You can then watch the round
 progress and read the summary without leaving the tab. The box edits like the
 composer (`Alt+Enter` for a new line, `↑`/`↓` for history, `Esc` to clear), so
 the tab's own commands use control keys:
 
-| Key (in the Σ tab) | Action |
+| Key (in the summary tab) | Action |
 |---|---|
 | typing, `Enter` | Write a prompt and send it to all harnesses |
 | `Ctrl+R` | Summarize now, or re-run the round being viewed. With no rounds yet, summarizes what every harness currently shows |
@@ -156,7 +168,7 @@ may be summarized from its last screenful.
 
 Drag with the left mouse button in any tab to select text; it's highlighted,
 and copied when you release the button. A plain click clears the selection; in
-the `Σ` tab a click on a section header still folds it.
+the summary tab a click on a section header still folds it.
 
 - In harness tabs, the selection comes from the emulated terminal, so lines
   the harness wrapped are joined back together.
@@ -239,6 +251,8 @@ With `--log-dir DIR`, agent-tabs writes:
 - `DIR/prompts.log`: every prompt sent from the composer, with a timestamp and
   its targets.
 - `DIR/summaries.log`: every summary, with the prompt it summarizes.
+- `DIR/captures/`: the screen text captured from each harness for each round,
+  which is what its section and the comparison are built from.
 
 ## Notes
 

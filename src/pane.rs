@@ -645,6 +645,7 @@ mod tests {
             args: vec!["-c".into(), script.into()],
             env: BTreeMap::new(),
             env_remove: Vec::new(),
+            ..Harness::default()
         }
     }
 
@@ -751,6 +752,7 @@ mod tests {
                 ],
                 env: BTreeMap::from([("TMUX".to_string(), "explicit".to_string())]),
                 env_remove: Vec::new(),
+                ..Harness::default()
             },
             std::path::Path::new("."),
             Size { cols: 80, rows: 4 },

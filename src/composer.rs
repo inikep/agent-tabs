@@ -234,18 +234,29 @@ impl Composer {
             KeyCode::Home => self.cursor = self.line_start(),
             KeyCode::End => self.cursor = self.line_end(),
             KeyCode::Up => {
-                if !self.move_up() {
+                if !self.move_up() && (self.text.is_empty() || self.history_pos.is_some()) {
                     self.recall(true);
                 }
             }
             KeyCode::Down => {
-                if !self.move_down() {
+                if !self.move_down() && self.history_pos.is_some() {
                     self.recall(false);
                 }
             }
             _ => {}
         }
         ComposerAction::None
+    }
+
+    pub fn set_cursor_line_col(&mut self, line: usize, col: usize) {
+        let start = self
+            .text
+            .split_inclusive('\n')
+            .take(line)
+            .map(str::len)
+            .sum::<usize>()
+            .min(self.text.len());
+        self.move_to_column(start, col);
     }
 
     pub fn cursor_line_col(&self) -> (usize, usize) {
@@ -336,6 +347,31 @@ mod tests {
         assert_eq!(c.selected(), [0, 1, 2]);
         press(&mut c, KeyCode::Char('0'), KeyModifiers::ALT);
         assert!(c.selected().is_empty());
+    }
+
+    #[test]
+    fn up_does_not_replace_text_being_edited() {
+        let mut c = Composer::new(1);
+        c.open(&[0]);
+        typed(&mut c, "first");
+        press(&mut c, KeyCode::Enter, KeyModifiers::NONE);
+        typed(&mut c, "a long draft");
+        press(&mut c, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(c.text(), "a long draft");
+        press(&mut c, KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(c.text(), "a long draft");
+    }
+
+    #[test]
+    fn set_cursor_line_col_moves_within_lines() {
+        let mut c = Composer::new(1);
+        typed(&mut c, "ab");
+        press(&mut c, KeyCode::Enter, KeyModifiers::ALT);
+        typed(&mut c, "cdef");
+        c.set_cursor_line_col(1, 2);
+        assert_eq!(c.cursor_line_col(), (1, 2));
+        c.set_cursor_line_col(0, 9);
+        assert_eq!(c.cursor_line_col(), (0, 2));
     }
 
     #[test]

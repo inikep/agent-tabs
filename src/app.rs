@@ -69,7 +69,26 @@ pub struct App {
     inputs: regex::RegexSet,
     summary_scroll: u16,
     summary_unseen: bool,
+    model_patterns: Vec<Vec<regex::Regex>>,
+    target_hits: std::cell::RefCell<Vec<TargetHit>>,
+    prompt_widths: std::cell::RefCell<std::collections::HashMap<PromptBox, usize>>,
+    exit_span: (u16, u16),
     quit: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum PromptBox {
+    Composer,
+    Summary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TargetHit {
+    kind: PromptBox,
+    y: u16,
+    x0: u16,
+    x1: u16,
+    target: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,6 +184,118 @@ fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
     rows
 }
 
+fn wrap_ranges(chars: &[char], width: usize) -> Vec<(usize, usize)> {
+    use unicode_width::UnicodeWidthChar;
+    if chars.is_empty() {
+        return vec![(0, 0)];
+    }
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    let mut start = 0;
+    while start < chars.len() {
+        let mut used = 0;
+        let mut end = start;
+        while end < chars.len() {
+            let w = chars[end].width().unwrap_or(0);
+            if used + w > width {
+                break;
+            }
+            used += w;
+            end += 1;
+        }
+        if end == start {
+            end = start + 1;
+        }
+        if end < chars.len()
+            && let Some(space) = chars[start..end].iter().rposition(|c| *c == ' ')
+            && space > 0
+        {
+            end = start + space + 1;
+        }
+        rows.push((start, end));
+        start = end;
+    }
+    rows
+}
+
+fn move_visual(composer: &mut Composer, width: Option<usize>, key: &KeyEvent) -> bool {
+    use unicode_width::UnicodeWidthChar;
+    let up = match key.code {
+        KeyCode::Up if key.modifiers.is_empty() => true,
+        KeyCode::Down if key.modifiers.is_empty() => false,
+        _ => return false,
+    };
+    let Some(width) = width else { return false };
+    let rows = visual_rows(composer.text(), width);
+    let (_, (row, x)) = layout_prompt(composer.text(), composer.cursor_line_col(), width);
+    let target = if up {
+        row.checked_sub(1)
+    } else {
+        Some(row + 1)
+    };
+    let Some((line, start, end, chars)) = target.and_then(|t| rows.get(t)) else {
+        return false;
+    };
+    let mut col = *start;
+    let mut used = 0;
+    while col < *end && used + chars[col].width().unwrap_or(0) <= x {
+        used += chars[col].width().unwrap_or(0);
+        col += 1;
+    }
+    if col == *end && *end > *start && chars[*end - 1] == ' ' && *end < chars.len() {
+        col = *end - 1;
+    }
+    composer.set_cursor_line_col(*line, col);
+    true
+}
+
+fn visual_rows(text: &str, width: usize) -> Vec<(usize, usize, usize, Vec<char>)> {
+    let mut rows = Vec::new();
+    for (index, line) in text.split('\n').enumerate() {
+        let chars: Vec<char> = line.chars().collect();
+        for (start, end) in wrap_ranges(&chars, width) {
+            rows.push((index, start, end, chars.clone()));
+        }
+    }
+    rows
+}
+
+fn layout_prompt(
+    text: &str,
+    cursor: (usize, usize),
+    width: usize,
+) -> (Vec<String>, (usize, usize)) {
+    use unicode_width::UnicodeWidthChar;
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    let mut position = (0, 0);
+    for (index, line) in text.split('\n').enumerate() {
+        let chars: Vec<char> = line.chars().collect();
+        let ranges = wrap_ranges(&chars, width);
+        let last = ranges.len() - 1;
+        for (r, &(start, end)) in ranges.iter().enumerate() {
+            if index == cursor.0 {
+                let col = cursor.1.min(chars.len());
+                if col >= start && (col < end || r == last) {
+                    let x: usize = chars[start..col]
+                        .iter()
+                        .map(|c| c.width().unwrap_or(0))
+                        .sum();
+                    position = (rows.len(), x);
+                }
+            }
+            rows.push(chars[start..end].iter().collect::<String>());
+        }
+    }
+    if position.1 >= width {
+        position = (position.0 + 1, 0);
+        if position.0 == rows.len() {
+            rows.push(String::new());
+        }
+    }
+    (rows, position)
+}
+
 fn columns_of(text: &str, from: u16, to: u16) -> String {
     use unicode_width::UnicodeWidthChar;
     let mut col: u16 = 0;
@@ -222,10 +353,21 @@ impl App {
             inputs: regex::RegexSet::empty(),
             summary_scroll: 0,
             summary_unseen: false,
+            model_patterns: Vec::new(),
+            target_hits: std::cell::RefCell::new(Vec::new()),
+            prompt_widths: std::cell::RefCell::new(std::collections::HashMap::new()),
+            exit_span: (0, 0),
             quit: false,
         };
         app.dialogs = app.config.dialog_regex()?;
         app.inputs = app.config.input_regex()?;
+        app.summary_input.select_all();
+        app.model_patterns = app
+            .config
+            .harnesses
+            .iter()
+            .map(|h| h.model_regexes())
+            .collect::<Result<_>>()?;
         let harnesses = app.config.harnesses.clone();
         for harness in harnesses {
             let pane = app.spawn_pane(harness);
@@ -533,6 +675,14 @@ impl App {
             self.mode = Mode::Normal;
             return;
         }
+        let width = self
+            .prompt_widths
+            .borrow()
+            .get(&PromptBox::Composer)
+            .copied();
+        if move_visual(&mut self.composer, width, &key) {
+            return;
+        }
         match self.composer.handle_key(&key) {
             ComposerAction::None => {}
             ComposerAction::Cancel => self.mode = Mode::Normal,
@@ -610,7 +760,41 @@ impl App {
         }
     }
 
+    fn target_hit(&self, column: u16, row: u16) -> Option<TargetHit> {
+        let kind = match self.mode {
+            Mode::Compose => PromptBox::Composer,
+            Mode::Normal if self.on_summary() => PromptBox::Summary,
+            _ => return None,
+        };
+        self.target_hits
+            .borrow()
+            .iter()
+            .rev()
+            .find(|h| h.kind == kind && h.y == row && column >= h.x0 && column < h.x1)
+            .copied()
+    }
+
     fn on_mouse(&mut self, mouse: MouseEvent) {
+        let left_down = matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left));
+        if left_down
+            && mouse.row == 0
+            && mouse.column >= self.exit_span.0
+            && mouse.column < self.exit_span.1
+        {
+            if self.mode == Mode::ConfirmQuit {
+                self.quit = true;
+            } else {
+                self.mode = Mode::ConfirmQuit;
+            }
+            return;
+        }
+        if left_down && let Some(hit) = self.target_hit(mouse.column, mouse.row) {
+            match hit.kind {
+                PromptBox::Composer => self.composer.toggle(hit.target),
+                PromptBox::Summary => self.summary_input.toggle(hit.target),
+            }
+            return;
+        }
         if mouse.row == 0 {
             if let MouseEventKind::Down(MouseButton::Left) = mouse.kind
                 && let Some(i) = self
@@ -683,14 +867,14 @@ impl App {
     fn tab_label(&self, index: usize) -> (String, Style) {
         let pane = &self.panes[index];
         let (marker, color) = match pane.status() {
-            Status::Running if self.has_pending(index) => (" ⧗", Color::Yellow),
-            Status::Running if self.needs_input(index) => (" ?", Color::Magenta),
-            Status::Running if pane.is_busy(BUSY_WINDOW) => (" ●", Color::Green),
-            Status::Running => ("", Color::Reset),
-            Status::Exited(_) => (" ✗", Color::Red),
-            Status::Failed(_) => (" !", Color::Red),
+            Status::Running if self.has_pending(index) => ('⧗', Color::Yellow),
+            Status::Running if self.needs_input(index) => ('?', Color::Magenta),
+            Status::Running if pane.is_busy(BUSY_WINDOW) => ('●', Color::Green),
+            Status::Running => (' ', Color::Reset),
+            Status::Exited(_) => ('✗', Color::Red),
+            Status::Failed(_) => ('!', Color::Red),
         };
-        let text = format!(" {} {}{} ", index + 1, pane.name(), marker);
+        let text = format!("{marker}{}", pane.name());
         let mut style = Style::default().fg(color);
         if index == self.active {
             style = style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
@@ -714,15 +898,28 @@ impl App {
             let (text, style) = self.tab_label(i);
             let width = text.width() as u16;
             self.tab_spans.push((x, x + width));
-            x += width + 1;
+            x += width + 3;
             spans.push(Span::styled(text, style));
-            spans.push(Span::raw("│").dark_gray());
+            spans.push(Span::raw(" │ ").dark_gray());
         }
         let (text, style) = self.summary_tab_label();
         let width = text.width() as u16;
         self.tab_spans.push((x, x + width));
         spans.push(Span::styled(text, style));
         frame.render_widget(Paragraph::new(Line::from(spans)), tabs_area);
+        let exit = " ✕ exit ";
+        let exit_width = exit.width() as u16;
+        let exit_x = tabs_area.right().saturating_sub(exit_width);
+        self.exit_span = (exit_x, tabs_area.right());
+        let exit_style = if self.mode == Mode::ConfirmQuit {
+            Style::default().white().on_red().bold()
+        } else {
+            Style::default().red()
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(exit, exit_style)),
+            Rect::new(exit_x, tabs_area.y, exit_width.min(tabs_area.width), 1),
+        );
 
         if self.on_summary() {
             let input_cursor = self.draw_summary(frame, pane_area);
@@ -796,7 +993,7 @@ impl App {
     fn status_line(&self) -> Line<'static> {
         let hint = |s: &str| Span::raw(s.to_string()).dark_gray();
         if self.on_summary() && matches!(self.mode, Mode::Normal | Mode::Help) {
-            let mut spans = vec![Span::raw(" Σ summary ").black().on_magenta()];
+            let mut spans = vec![Span::raw(" summary ").black().on_magenta()];
             if let Some((text, at)) = &self.message
                 && at.elapsed() < Duration::from_secs(4)
             {
@@ -830,7 +1027,7 @@ impl App {
             ]),
             Mode::ConfirmQuit => Line::from(vec![
                 Span::raw(" QUIT ").white().on_red(),
-                Span::raw(" Stop all harnesses and quit? y/N"),
+                Span::raw(" Stop all harnesses and quit? y/N, or click ✕ exit again"),
             ]),
             Mode::ConfirmRestart => Line::from(vec![
                 Span::raw(" RESTART ").white().on_red(),
@@ -860,9 +1057,10 @@ impl App {
     }
 
     fn prompt_box_height(composer: &Composer, area: Rect) -> u16 {
-        let lines = composer.text().split('\n').count() as u16;
+        let width = area.width.saturating_sub(2).max(1) as usize;
+        let (rows, _) = layout_prompt(composer.text(), composer.cursor_line_col(), width);
         let max_height = (area.height / 2).max(3);
-        (lines + 2).clamp(3, max_height)
+        (rows.len() as u16 + 2).clamp(3, max_height)
     }
 
     fn draw_composer(&self, frame: &mut Frame, pane_area: Rect) -> Option<Position> {
@@ -873,7 +1071,13 @@ impl App {
             pane_area.width,
             height,
         );
-        self.draw_prompt_box(frame, area, &self.composer, " Prompt → ")
+        self.draw_prompt_box(
+            frame,
+            area,
+            &self.composer,
+            " Prompt → ",
+            PromptBox::Composer,
+        )
     }
 
     fn draw_prompt_box(
@@ -882,15 +1086,17 @@ impl App {
         area: Rect,
         composer: &Composer,
         heading: &'static str,
+        kind: PromptBox,
     ) -> Option<Position> {
-        let lines: Vec<&str> = composer.text().split('\n').collect();
         let mut title = vec![Span::raw(heading)];
+        let mut x = area.x + 1 + heading.width() as u16;
+        let mut hits = self.target_hits.borrow_mut();
+        hits.retain(|h| h.kind != kind);
         for (i, pane) in self.panes.iter().enumerate() {
             let on = composer.targets[i];
             let label = format!(
-                "[{}] {} {}{} ",
+                "[{}] {}{} ",
                 if on { "x" } else { " " },
-                i + 1,
                 pane.name(),
                 match self.readiness(i) {
                     Readiness::Ready => "",
@@ -899,36 +1105,45 @@ impl App {
                     Readiness::NotRunning => " (not running)",
                 }
             );
+            let width = label.width() as u16;
+            hits.push(TargetHit {
+                kind,
+                y: area.y,
+                x0: x,
+                x1: x + width,
+                target: i,
+            });
+            x += width;
             title.push(if on {
                 Span::raw(label).cyan().bold()
             } else {
                 Span::raw(label).dark_gray()
             });
         }
+        drop(hits);
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().cyan())
             .title(Line::from(title));
         let inner = block.inner(area);
-        let (line, col) = composer.cursor_line_col();
-        let visible = inner.height as usize;
-        let first = line.saturating_sub(visible.saturating_sub(1));
-        let shown: Vec<Line> = lines
+        let width = inner.width.max(1) as usize;
+        self.prompt_widths.borrow_mut().insert(kind, width);
+        let (rows, (cursor_row, cursor_x)) =
+            layout_prompt(composer.text(), composer.cursor_line_col(), width);
+        let visible = (inner.height as usize).max(1);
+        let first = cursor_row.saturating_sub(visible - 1);
+        let shown: Vec<Line> = rows
             .iter()
             .skip(first)
             .take(visible)
-            .map(|l| Line::raw(l.to_string()))
+            .map(|row| Line::raw(row.clone()))
             .collect();
 
         frame.render_widget(Clear, area);
         frame.render_widget(Paragraph::new(shown).block(block), area);
 
-        let before = lines.get(line).map(|l| {
-            let byte = l.char_indices().nth(col).map(|(i, _)| i).unwrap_or(l.len());
-            l[..byte].width() as u16
-        })?;
-        let x = (inner.x + before).min(inner.right().saturating_sub(1));
-        let y = inner.y + (line - first) as u16;
+        let x = (inner.x + cursor_x as u16).min(inner.right().saturating_sub(1));
+        let y = inner.y + (cursor_row - first) as u16;
         Some(Position::new(x, y))
     }
 
@@ -947,12 +1162,13 @@ impl App {
             Line::from("  r            restart this harness"),
             Line::from("  x            cancel prompts queued for this harness"),
             Line::from(
-                "  r (Σ tab)    summarize the latest answers now (also Ctrl+R in the Σ tab)",
+                "  r (summary)  summarize the latest answers now (also Ctrl+R in the summary tab)",
             ),
             Line::from("  q            quit (stops all harnesses)"),
             Line::from("  Ctrl+\\       send a literal Ctrl+\\ to the harness"),
             Line::from(""),
             Line::from("Mouse: drag with the left button to select text; it's copied on release."),
+            Line::from("Click a [x] target in a prompt box to toggle it; click ✕ exit to quit."),
             Line::from(""),
             Line::from("Prompt composer:").bold(),
             Line::from("  Enter send · Alt+Enter / Ctrl+J newline · Alt+1-9 toggle target"),
@@ -961,8 +1177,10 @@ impl App {
             Line::from(
                 "Tab markers: ● output · ⧗ prompt queued · ? waiting for your answer · ✗ exited",
             ),
-            Line::from("Σ summary: a prompt sent to 2+ harnesses is summarized once all go quiet."),
-            Line::from("Type in the Σ tab's prompt box and press Enter to send to all harnesses."),
+            Line::from("Summary tab: a prompt sent to 2+ harnesses is compared once all go quiet."),
+            Line::from(
+                "Type in the summary tab's prompt box and press Enter to send to all harnesses.",
+            ),
             Line::from("A prompt waits in the queue while its harness is starting or shows a"),
             Line::from("dialog such as a folder-trust prompt, and is sent once it's at its input."),
             Line::from(""),
@@ -1019,10 +1237,48 @@ impl App {
     }
 
     fn capture(&self, pane: usize, mark: usize, finished: bool) -> Capture {
+        let text = self.panes[pane].text_since(mark, self.config.summary.max_lines);
+        let text = if self.panes[pane].harness.strips_right_panel() {
+            crate::summary::strip_right_panel(&text)
+        } else {
+            text
+        };
         Capture {
-            text: self.panes[pane].text_since(mark, self.config.summary.max_lines),
+            text,
             finished,
+            model: self.model_of(pane),
         }
+    }
+
+    fn log_capture(&self, index: usize, slot: usize, capture: &Capture) {
+        let Some(dir) = &self.log_dir else { return };
+        let round = &self.rounds[index];
+        let dir = dir.join("captures");
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        let state = if capture.finished {
+            "finished"
+        } else {
+            "unfinished"
+        };
+        let file = dir.join(format!(
+            "{}-{}-{}.txt",
+            round.started_at, round.names[slot], state
+        ));
+        let _ = std::fs::write(file, &capture.text);
+    }
+
+    fn model_of(&self, pane: usize) -> Option<String> {
+        let harness = &self.panes[pane].harness;
+        let detected = match &harness.model {
+            Some(_) => None,
+            None => crate::config::detect_model(
+                self.model_patterns.get(pane)?,
+                &self.panes[pane].screen_text(),
+            ),
+        };
+        harness.model_label(detected)
     }
 
     pub fn tick_summary(&mut self) -> bool {
@@ -1064,8 +1320,9 @@ impl App {
                 }
                 None => None,
             };
-            if capture.is_some() {
-                self.rounds[index].captures[slot] = capture;
+            if let Some(capture) = capture {
+                self.log_capture(index, slot, &capture);
+                self.rounds[index].captures[slot] = Some(capture);
                 changed = true;
             }
         }
@@ -1219,17 +1476,23 @@ impl App {
             KeyCode::Down if ctrl => self.summary_scroll = self.summary_scroll.saturating_add(1),
             KeyCode::PageUp => self.summary_scroll = self.summary_scroll.saturating_sub(page),
             KeyCode::PageDown => self.summary_scroll = self.summary_scroll.saturating_add(page),
-            _ => {
-                self.summary_input.select_all();
-                match self.summary_input.handle_key(&key) {
-                    ComposerAction::None => {}
-                    ComposerAction::Cancel => self.summary_input.clear(),
-                    ComposerAction::Submit { text, targets } => {
-                        self.submit_prompt(&text, &targets);
-                        self.summary_scroll = 0;
-                    }
+            KeyCode::Up | KeyCode::Down
+                if move_visual(
+                    &mut self.summary_input,
+                    self.prompt_widths
+                        .borrow()
+                        .get(&PromptBox::Summary)
+                        .copied(),
+                    &key,
+                ) => {}
+            _ => match self.summary_input.handle_key(&key) {
+                ComposerAction::None => {}
+                ComposerAction::Cancel => self.summary_input.clear(),
+                ComposerAction::Submit { text, targets } => {
+                    self.submit_prompt(&text, &targets);
+                    self.summary_scroll = 0;
                 }
-            }
+            },
         }
     }
 
@@ -1262,18 +1525,29 @@ impl App {
 
     fn summary_tab_label(&self) -> (String, Style) {
         let (marker, color) = match self.rounds.last().map(Round::state) {
-            Some(SummaryState::Waiting) => (" ⧗", Color::Yellow),
-            Some(SummaryState::Running { .. }) => (" …", Color::Cyan),
-            Some(SummaryState::Done { .. }) if self.summary_unseen => (" ●", Color::Green),
-            Some(SummaryState::Failed(_)) => (" !", Color::Red),
-            _ => ("", Color::Reset),
+            Some(SummaryState::Waiting) => ('⧗', Color::Yellow),
+            Some(SummaryState::Running { .. }) => ('…', Color::Cyan),
+            Some(SummaryState::Done { .. }) if self.summary_unseen => ('●', Color::Green),
+            Some(SummaryState::Failed(_)) => ('!', Color::Red),
+            _ => (' ', Color::Reset),
         };
-        let text = format!(" {} Σ summary{} ", self.summary_tab() + 1, marker);
+        let text = format!("{marker}summary");
         let mut style = Style::default().fg(color);
         if self.on_summary() {
             style = style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
         }
         (text, style)
+    }
+
+    fn agent_label(&self, round: &Round, slot: usize) -> String {
+        let model = round.captures[slot]
+            .as_ref()
+            .and_then(|c| c.model.clone())
+            .or_else(|| self.model_of(round.targets[slot]));
+        match model {
+            Some(model) => format!("{} · {model}", round.names[slot]),
+            None => round.names[slot].clone(),
+        }
     }
 
     fn agent_status(&self, round: &Round, slot: usize) -> (String, Color) {
@@ -1372,7 +1646,7 @@ impl App {
             lines.push((
                 self.section_header(
                     slot,
-                    round.names[slot].clone(),
+                    self.agent_label(round, slot),
                     self.agent_status(round, slot),
                     headline.as_deref(),
                 ),
@@ -1431,7 +1705,7 @@ impl App {
             _ => None,
         };
         lines.push((
-            self.section_header(overall, "Σ comparison".into(), status, headline),
+            self.section_header(overall, "comparison".into(), status, headline),
             Some(overall),
         ));
         if !self.summary_folded.get(overall).copied().unwrap_or(false) {
@@ -1450,8 +1724,7 @@ impl App {
     }
 
     fn draw_summary(&mut self, frame: &mut Frame, area: Rect) -> Option<Position> {
-        let mut input = self.summary_input.clone();
-        input.select_all();
+        let input = self.summary_input.clone();
         let input_height = Self::prompt_box_height(&input, area);
         let [view_area, input_area] =
             Layout::vertical([Constraint::Min(3), Constraint::Length(input_height)]).areas(area);
@@ -1492,7 +1765,7 @@ impl App {
                 }
             }
         }
-        self.draw_prompt_box(frame, input_area, &input, " Prompt all → ")
+        self.draw_prompt_box(frame, input_area, &input, " Prompt → ", PromptBox::Summary)
     }
 
     fn pane_rect(&self) -> Rect {
@@ -1655,6 +1928,7 @@ mod tests {
             args: vec!["-c".into(), script.into()],
             env: BTreeMap::new(),
             env_remove: Vec::new(),
+            ..Harness::default()
         }
     }
 
@@ -1794,7 +2068,7 @@ mod tests {
             thread::sleep(Duration::from_millis(50));
         }
         assert!(app.needs_input(1));
-        assert_eq!(app.tab_label(1).0, " 2 asker ? ");
+        assert_eq!(app.tab_label(1).0, "?asker");
         assert!(summary_text(&app).contains("waiting for your answer"));
         wait_summary(&mut app, "SUMMARY:2");
         assert!(app.rounds[0].input().contains("answered"));
@@ -1835,7 +2109,7 @@ mod tests {
         let text = summary_text(&app);
         assert!(text.contains("▸ a  ✓ done  — • answer from a"), "{text}");
         assert!(!text.contains("    • answer from a"), "{text}");
-        assert!(text.contains("▾ Σ comparison"), "{text}");
+        assert!(text.contains("▾ comparison"), "{text}");
         assert_eq!(app.rounds[0].answer(0).unwrap(), "• answer from a");
 
         app.handle_event(key(KeyCode::Char('3'), KeyModifiers::ALT));
@@ -1958,6 +2232,141 @@ mod tests {
         mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 1, header);
         mouse(&mut app, MouseEventKind::Up(MouseButton::Left), 1, header);
         assert!(summary_text(&app).contains("▾ a"));
+    }
+
+    fn click(app: &mut App, column: u16, row: u16) {
+        mouse(app, MouseEventKind::Down(MouseButton::Left), column, row);
+        mouse(app, MouseEventKind::Up(MouseButton::Left), column, row);
+    }
+
+    fn find(rows: &[String], needle: &str) -> (u16, u16) {
+        rows.iter()
+            .enumerate()
+            .find_map(|(y, r)| {
+                r.find(needle)
+                    .map(|byte| (r[..byte].chars().count() as u16, y as u16))
+            })
+            .unwrap_or_else(|| panic!("{needle:?} not on screen: {rows:#?}"))
+    }
+
+    #[test]
+    fn clicking_a_target_in_the_summary_prompt_box_toggles_it() {
+        let mut app = app(&["a", "b", "c"]);
+        thread::sleep(Duration::from_millis(200));
+        app.handle_event(key(KeyCode::Char('4'), KeyModifiers::ALT));
+        let rows = buffer_rows(&draw_app(&mut app, 100, 20));
+        let (x, y) = find(&rows, "[x] b");
+        click(&mut app, x + 1, y);
+        assert_eq!(app.summary_input.selected(), [0, 2]);
+        let rows = buffer_rows(&draw_app(&mut app, 100, 20));
+        assert!(rows.iter().any(|r| r.contains("[ ] b")), "{rows:#?}");
+        type_text(&mut app, "only a and c");
+        app.handle_event(key(KeyCode::Enter, KeyModifiers::NONE));
+        wait_for(app.pane(0), "got:only a and c");
+        wait_for(app.pane(2), "got:only a and c");
+        thread::sleep(Duration::from_millis(200));
+        assert!(!screen(app.pane(1)).contains("only a and c"));
+        assert_eq!(
+            app.summary_input.selected(),
+            [0, 2],
+            "selection is kept for the next prompt"
+        );
+    }
+
+    #[test]
+    fn clicking_a_target_in_the_composer_toggles_it() {
+        let mut app = app(&["a", "b"]);
+        app.handle_event(key(KeyCode::Char('\\'), KeyModifiers::CONTROL));
+        app.handle_event(key(KeyCode::Char('a'), KeyModifiers::NONE));
+        let rows = buffer_rows(&draw_app(&mut app, 100, 20));
+        let (x, y) = find(&rows, "[x] a");
+        click(&mut app, x, y);
+        assert_eq!(app.composer.selected(), [1]);
+        assert_eq!(app.mode(), Mode::Compose);
+    }
+
+    #[test]
+    fn exit_button_asks_first_then_quits() {
+        let mut app = app(&["a"]);
+        let rows = buffer_rows(&draw_app(&mut app, 80, 10));
+        let (x, y) = find(&rows, "✕ exit");
+        assert_eq!(y, 0);
+        assert!(x > 60, "exit is right-aligned: {x}");
+        click(&mut app, x + 2, 0);
+        assert_eq!(app.mode(), Mode::ConfirmQuit);
+        assert!(!app.quit);
+        app.handle_event(key(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert_eq!(app.mode(), Mode::Normal);
+        click(&mut app, x + 2, 0);
+        draw_app(&mut app, 80, 10);
+        click(&mut app, x + 2, 0);
+        assert!(app.quit);
+    }
+
+    #[test]
+    fn tab_labels_keep_their_width_when_a_marker_appears() {
+        let mut app = app_with(vec![
+            script_harness("quiet", "sleep 30"),
+            script_harness("busy", "while true; do echo x; sleep 0.2; done"),
+        ]);
+        wait_for(app.pane(1), "x");
+        let quiet = app.tab_label(0).0;
+        let busy = app.tab_label(1).0;
+        assert_eq!(quiet, " quiet");
+        assert_eq!(busy, "●busy");
+        assert_eq!(quiet.width(), "quiet".width() + 1);
+        assert_eq!(busy.width(), "busy".width() + 1);
+        let summary = app.summary_tab_label().0;
+        assert_eq!(summary, " summary");
+        compose_all(&mut app, "q");
+        assert_eq!(app.summary_tab_label().0.width(), summary.width());
+    }
+
+    #[test]
+    fn long_prompts_wrap_and_keep_the_cursor_visible() {
+        let text = "alpha beta gamma delta";
+        let (rows, cursor) = layout_prompt(text, (0, text.chars().count()), 10);
+        assert_eq!(rows, ["alpha ", "beta ", "gamma ", "delta"]);
+        assert_eq!(cursor, (3, 5));
+        assert_eq!(layout_prompt(text, (0, 7), 10).1, (1, 1));
+        assert_eq!(layout_prompt(text, (0, 6), 10).1, (1, 0));
+        let (rows, cursor) = layout_prompt("abcdefghij", (0, 10), 10);
+        assert_eq!(rows, ["abcdefghij", ""]);
+        assert_eq!(cursor, (1, 0));
+        let (rows, cursor) = layout_prompt("one\ntwo three four", (1, 3), 6);
+        assert_eq!(rows, ["one", "two ", "three ", "four"]);
+        assert_eq!(cursor, (1, 3));
+        assert_eq!(layout_prompt("", (0, 0), 5), (vec![String::new()], (0, 0)));
+    }
+
+    #[test]
+    fn up_and_down_move_between_wrapped_rows() {
+        let mut composer = Composer::new(1);
+        composer.insert_str("alpha beta gamma delta");
+        let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        assert!(move_visual(&mut composer, Some(10), &up));
+        assert_eq!(composer.cursor_line_col(), (0, 16));
+        assert!(move_visual(&mut composer, Some(10), &up));
+        assert_eq!(composer.cursor_line_col(), (0, 10));
+        assert!(move_visual(&mut composer, Some(10), &down));
+        assert_eq!(composer.cursor_line_col(), (0, 15));
+        composer.set_cursor_line_col(0, 0);
+        assert!(!move_visual(&mut composer, Some(10), &up));
+        assert!(!move_visual(&mut composer, None, &up));
+        assert_eq!(composer.text(), "alpha beta gamma delta");
+    }
+
+    #[test]
+    fn prompt_box_shows_wrapped_long_text() {
+        let mut app = app(&["a", "b"]);
+        app.handle_event(key(KeyCode::Char('3'), KeyModifiers::ALT));
+        let long = "word ".repeat(40);
+        app.handle_event(Event::Paste(long.trim_end().to_string()));
+        let rows = buffer_rows(&draw_app(&mut app, 40, 30));
+        let boxed: Vec<&String> = rows.iter().filter(|r| r.starts_with("│word")).collect();
+        assert!(boxed.len() >= 5, "{rows:#?}");
+        assert!(boxed.iter().all(|r| r.ends_with('│')), "{rows:#?}");
     }
 
     #[test]

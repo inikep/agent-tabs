@@ -63,6 +63,7 @@ pub enum SummaryState {
 pub struct Capture {
     pub text: String,
     pub finished: bool,
+    pub model: Option<String>,
 }
 
 #[derive(Debug)]
@@ -155,9 +156,14 @@ fn is_separator(line: &str) -> bool {
     (total >= 3 && boxed == total) || (total >= 8 && (boxed + ascii) * 10 >= total * 8)
 }
 
+const INPUT_MARKERS: [&str; 5] = ["❯", "›", ">", "→", "┃"];
+
 fn is_input_line(line: &str) -> bool {
+    if is_step_line(line) {
+        return false;
+    }
     let text = line.trim_start();
-    ["❯", "›", ">", "→"].iter().any(|marker| {
+    INPUT_MARKERS.iter().any(|marker| {
         text.strip_prefix(marker)
             .is_some_and(|rest| rest.trim().is_empty() || rest.starts_with(char::is_whitespace))
     })
@@ -165,7 +171,7 @@ fn is_input_line(line: &str) -> bool {
 
 fn normalize(text: &str) -> String {
     let text = text.trim_start();
-    let text = ["❯", "›", ">", "→"]
+    let text = INPUT_MARKERS
         .iter()
         .find_map(|marker| text.strip_prefix(marker))
         .unwrap_or(text);
@@ -196,7 +202,7 @@ fn starts_item(line: &str) -> bool {
 fn is_step_line(line: &str) -> bool {
     static STEP: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(
-            r"^\s*[●•○◦⏺]\s*(?:(Explored|Explore|Exploring|Read|Reading|Ran|Running|Searched|Searching|Search|Listed|List|Edited|Edit|Editing|Update|Updated|Write|Wrote|Thought|Thinking|Bash|Grep|Glob|Called|Fetched|Fetch|Task|Agent)\b|[A-Z]\w*\()",
+            r"^\s*[●•○◦⏺✱→⚙◇]\s*(?:(Explored|Explore|Exploring|Read|Reading|Ran|Running|Searched|Searching|Search|Listed|List|Edited|Edit|Editing|Update|Updated|Write|Wrote|Thought|Thinking|Bash|Grep|Glob|Called|Fetched|Fetch|WebFetch|Task|Agent|Patch|Todo|Todos|Shell)\b|[A-Z]\w*\()",
         )
         .expect("valid regex")
     });
@@ -210,7 +216,7 @@ fn is_tool_line(line: &str) -> bool {
 
 fn is_thinking_line(line: &str) -> bool {
     static THINKING: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"^\s*[▸▾○●•◦⏺✻]?\s*(Thought|Thinking)\b").expect("valid regex")
+        regex::Regex::new(r"^\s*┃?\s*[▸▾○●•◦⏺✻+]?\s*(Thought|Thinking)\b").expect("valid regex")
     });
     THINKING.is_match(line)
 }
@@ -223,6 +229,55 @@ fn indent(line: &str) -> usize {
     line.len() - line.trim_start().len()
 }
 
+fn is_right_aligned_notice(line: &str) -> bool {
+    indent(line) >= 40
+}
+
+fn is_status_line(line: &str) -> bool {
+    line.trim_start().starts_with('▣')
+}
+
+fn is_noise_line(line: &str) -> bool {
+    is_timing_line(line) || is_status_line(line) || is_right_aligned_notice(line)
+}
+
+pub fn strip_right_panel(text: &str) -> String {
+    let lines: Vec<Vec<char>> = text.lines().map(|l| l.chars().collect()).collect();
+    let width = lines.iter().map(Vec::len).max().unwrap_or(0);
+    if width < 80 {
+        return text.to_string();
+    }
+    let gap = 3;
+    for column in (width * 2 / 5).max(gap)..width.saturating_sub(8) {
+        let mut starts = 0;
+        let mut crossing = 0;
+        for line in &lines {
+            if line.len() <= column {
+                continue;
+            }
+            if line[column - gap..column].iter().any(|c| *c != ' ') {
+                crossing += 1;
+            } else if line[column] != ' ' {
+                starts += 1;
+            }
+        }
+        if starts >= 4 && crossing == 0 {
+            return lines
+                .iter()
+                .map(|line| {
+                    line.iter()
+                        .take(column)
+                        .collect::<String>()
+                        .trim_end()
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+    }
+    text.to_string()
+}
+
 pub fn final_message(answer: &str) -> String {
     let lines: Vec<&str> = answer.lines().collect();
     let mut start = None;
@@ -230,10 +285,10 @@ pub fn final_message(answer: &str) -> String {
     let mut tool_indent: Option<usize> = None;
     let mut thinking = false;
     for (i, line) in lines.iter().enumerate() {
-        if line.trim().is_empty() {
+        if line.trim().is_empty() || is_right_aligned_notice(line) {
             continue;
         }
-        if is_input_line(line) {
+        if is_input_line(line) && !is_thinking_line(line) {
             start = None;
             tool_indent = None;
             thinking = false;
@@ -245,18 +300,14 @@ pub fn final_message(answer: &str) -> String {
         }
         if is_thinking_line(line) {
             thinking = true;
+            tool_indent = None;
             continue;
         }
         if thinking && (line.trim_end().ends_with('…') || line.trim_end().ends_with("...")) {
             continue;
         }
         let after_thinking = std::mem::take(&mut thinking);
-        if is_timing_line(line) {
-            continue;
-        }
-        if after_thinking {
-            tool_indent = None;
-            start = Some(i);
+        if is_noise_line(line) {
             continue;
         }
         if is_tool_line(line) {
@@ -267,7 +318,7 @@ pub fn final_message(answer: &str) -> String {
             continue;
         }
         let after_tool = tool_indent.take().is_some();
-        if is_message_start(line) || after_tool || start.is_none() {
+        if after_thinking || is_message_start(line) || after_tool || start.is_none() {
             start = Some(i);
         }
     }
@@ -277,7 +328,7 @@ pub fn final_message(answer: &str) -> String {
     let mut message: Vec<&str> = lines[start..end]
         .iter()
         .copied()
-        .filter(|l| !is_timing_line(l) && !is_thinking_line(l))
+        .filter(|l| !is_noise_line(l) && !is_thinking_line(l))
         .collect();
     while message.last().is_some_and(|l| l.trim().is_empty()) {
         message.pop();
@@ -317,7 +368,7 @@ pub fn headline(answer: &str) -> Option<String> {
     let lines: Vec<&str> = answer.lines().collect();
     let last = lines
         .iter()
-        .rposition(|l| !l.trim().is_empty() && !is_timing_line(l))?;
+        .rposition(|l| !l.trim().is_empty() && !is_noise_line(l))?;
     let mut first = last;
     while first > 0 && !starts_item(lines[first]) && !lines[first - 1].trim().is_empty() {
         first -= 1;
@@ -408,7 +459,14 @@ Keep it under 300 words, as plain text with short bullet points. Do not use any 
         } else {
             "still working when captured"
         };
-        out.push_str(&format!("\n<agent name=\"{name}\" status=\"{status}\">\n"));
+        let model = capture
+            .model
+            .as_deref()
+            .map(|m| format!(" model=\"{}\"", m.replace('"', "'")))
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "\n<agent name=\"{name}\"{model} status=\"{status}\">\n"
+        ));
         let text = capture.text.trim();
         out.push_str(if text.is_empty() {
             "(no output captured)"
@@ -506,6 +564,7 @@ mod tests {
         Capture {
             text: text.into(),
             finished,
+            model: None,
         }
     }
 
@@ -624,6 +683,19 @@ mod tests {
     }
 
     #[test]
+    fn agy_answer_after_tool_step_and_thinking() {
+        let screen = "> In one sentence: what does get() return?\n● Explored 1 file (a.c) (ctrl+o to expand)\n▸ Thought for 7s, 196 tokens\n  I'm examining the `get` function. My current focus is on the conditional grea...\n  When i is out of range, get() returns -1 if i > n,\n  and reads a[i] if i == n.\n──────────────────────────\n>\n──────────────────────────\n? for shortcuts";
+        let answer = final_message(&extract_answer(
+            screen,
+            "In one sentence: what does get() return?",
+        ));
+        assert_eq!(
+            answer,
+            "  When i is out of range, get() returns -1 if i > n,\n  and reads a[i] if i == n."
+        );
+    }
+
+    #[test]
     fn short_box_rule_is_a_separator_but_markdown_dashes_are_not() {
         assert!(is_separator("  ──────"));
         assert!(!is_separator("---"));
@@ -642,6 +714,82 @@ mod tests {
         let fallback = final_message(&extract_answer(screen, "a prompt that is not on screen"));
         assert_eq!(fallback, answer);
         assert!(is_input_line("❯\u{a0}fix the off-by-one"));
+    }
+
+    #[test]
+    fn claude_notice_above_the_prompt_is_not_the_answer() {
+        let screen = " ▐▛███▛█   Claude Code v2.1.305\n▝▜██████▀  Opus 5.5 with high effort · Claude Team\n ▝▝   ▝▝   /tmp/e2e\n⚠ Your login expires in 1 day · run /login to renew\n❯ Reply with exactly: MODELS OK\n● MODELS OK\n✻ Cogitated for 3s · done 11:16 PM\n────────────────────────────────────────\n❯ \n────────────────────────────────────────\n  Opus 5.5 high | v2.1.305 | /tmp/e2e\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← 1 agent";
+        let answer = final_message(&extract_answer(screen, "Reply with exactly: MODELS OK"));
+        assert_eq!(answer, "● MODELS OK");
+        let with_toast = screen.replace(
+            "✻ Cogitated for 3s · done 11:16 PM\n",
+            "✻ Baked for 1s · done 11:17 PM\n\n                                                  Your login expires in 1 day · run /login to renew\n",
+        );
+        assert_eq!(
+            final_message(&extract_answer(
+                &with_toast,
+                "Reply with exactly: MODELS OK"
+            )),
+            "● MODELS OK"
+        );
+        assert_eq!(headline(&answer).as_deref(), Some("● MODELS OK"));
+    }
+
+    const OPENCODE_SCREEN: &str = "  ┃                                                                                                           a.c get() out-of-range return
+  ┃  In one sentence: what does get() in a.c return when i is out of range? Do not edit files.                behavior
+  ┃
+                                                                                                              Context
+     + Thought: 490ms                                                                                         31,614 tokens
+                                                                                                              3% used
+     ✱ Glob \"**/a.c\" (1 match)                                                                                $0.13 spent
+     → Read a.c
+                                                                                                              ▼ MCP
+     + Thought: 1.2s                                                                                          • github Connected
+                                                                                                              • google-sheets MCP error -3200
+     It returns -1 only when i > n; however, due to an off-by-one bug (i <= n instead of i < n), an out-        Connection closed
+     of-range i == n (and any negative i) returns a[i] — an out-of-bounds read.                               • jenkins Needs auth
+                                                                                                              • lad Connected
+
+     ▣  Build · Kimi K3 (Global) · 12.8s                                                                      • serena Connected
+                                                                                                              LSP
+
+  ┃
+  ┃                                                                                                           /tmp/claude-1000/-work-percona-
+  ┃  Build · Kimi K3 (Global) Amazon Bedrock                                                                  4c26-8e72-766f9f1be90b/scratch
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+   /tmp/e2e                                                                   31.6K (3%) · $0 ctrl+p";
+
+    #[test]
+    fn opencode_sidebar_is_stripped() {
+        let stripped = strip_right_panel(OPENCODE_SCREEN);
+        assert!(
+            !stripped.contains("Connected") && !stripped.contains("Context"),
+            "{stripped}"
+        );
+        assert!(
+            stripped.contains("an out-\n     of-range i == n"),
+            "{stripped}"
+        );
+        let plain = "a short screen\nwith no sidebar";
+        assert_eq!(strip_right_panel(plain), plain);
+    }
+
+    #[test]
+    fn opencode_final_message_and_headline() {
+        let prompt = "In one sentence: what does get() in a.c return when i is out of range? Do not edit files.";
+        let answer = final_message(&extract_answer(&strip_right_panel(OPENCODE_SCREEN), prompt));
+        assert_eq!(
+            answer,
+            "     It returns -1 only when i > n; however, due to an off-by-one bug (i <= n instead of i < n), an out-\n     of-range i == n (and any negative i) returns a[i] — an out-of-bounds read."
+        );
+        assert!(
+            headline(&answer)
+                .unwrap()
+                .starts_with("It returns -1 only when i > n")
+        );
+        assert!(is_step_line("     → Read a.c"));
+        assert!(!is_input_line("     → Read a.c"));
+        assert!(is_input_line("  → Add a follow-up"));
     }
 
     #[test]
@@ -690,6 +838,17 @@ mod tests {
         assert_eq!(
             extract_answer("  just output  \n", "missing prompt"),
             "just output"
+        );
+    }
+
+    #[test]
+    fn prompt_includes_the_model_when_known() {
+        let mut a = capture("x", true);
+        a.model = Some("Opus 5.5 high".into());
+        let text = build_prompt("q", &[("claude", &a)]);
+        assert!(
+            text.contains("<agent name=\"claude\" model=\"Opus 5.5 high\" status=\"finished\">"),
+            "{text}"
         );
     }
 
