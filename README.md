@@ -82,6 +82,20 @@ In the prompt composer:
 | `Ctrl+U` / `Ctrl+K` / `Ctrl+W` | Delete to line start / line end / previous word |
 | `Esc` | Cancel |
 
+A harness with `enabled = false` in the config is not started with
+agent-tabs and has no tab. It is still listed, unchecked, in the prompt boxes
+(the summary tab's and `Ctrl+\` `a`). Check it there, by clicking `[ ] name` or
+with `Alt+N` in the composer, and agent-tabs starts it and shows its tab right
+away. From then on it is treated like any other harness. `--only` starts the
+harnesses it names even when they are disabled.
+
+```toml
+[[harness]]
+name = "grok-4.7"
+command = "cursor-agent"
+enabled = false
+```
+
 A composed prompt is sent to each target as a bracketed paste, so a multi-line
 prompt arrives as one message. After `submit_delay_ms` agent-tabs presses
 `Enter` for you.
@@ -112,11 +126,13 @@ waits in a queue, and the tab shows `⧗`:
   final `Enter` would answer the dialog; for claude that can mean "No, exit".
 
 Answer the dialog in its tab and the queued prompt follows automatically. The
-composer shows each target's state, e.g. `[x] agy (dialog open)`.
+harness's tab shows `⚑` while its folder-trust dialog is open.
 
 Tab markers: `●` the harness produced output in the last 1.5 s (it's working),
-`⧗` a prompt is queued, `?` it's waiting for your answer to a permission
-prompt (`input_patterns`), `✗` it exited, `!` it failed to start.
+`⚑` it's waiting for you to trust the folder (`dialog_patterns`), `⧗` a prompt
+is queued, `?` it's waiting for your answer to a permission prompt
+(`input_patterns`), `✗` it exited, `!` it failed to start. Tabs of disabled
+harnesses that have not been started are hidden.
 
 Harnesses that run full-screen (claude, codex and agy at the time of writing)
 handle their own scrolling, so `PgUp`/`PgDn` and the mouse wheel are passed
@@ -125,7 +141,8 @@ to `scrollback` lines of history.
 
 ## Summary tab
 
-After the harness tabs comes a `summary` tab (`Alt+5` with four harnesses).
+The first tab is the `summary` tab (`Alt+1`), and agent-tabs starts on it.
+The harness tabs follow in config order (`Alt+2` is the first harness).
 Whenever you send a prompt to two or more harnesses, agent-tabs starts a
 *round*:
 
@@ -133,11 +150,17 @@ Whenever you send a prompt to two or more harnesses, agent-tabs starts a
    `quiet_secs`, and isn't asking you anything: no line near the bottom of its
    screen matches `input_patterns` (permission prompts such as claude's "Do
    you want to proceed?" or agy's "Run this command?"). A harness that exits
-   also counts as done. If a round takes longer than `wait_timeout_secs`, or
-   you press `Ctrl+R` before every harness is done, whatever is on screen is
-   used and marked as unfinished. agent-tabs keeps watching those harnesses:
-   when one finishes, its section is updated, and once every answer is
-   complete a comparison that used unfinished answers runs again.
+   also counts as done. A harness whose screen matches `working_patterns` is
+   still working in the background, even when quiet, and is not done yet. By
+   default these are `still running` (claude's "1 shell, 1 monitor still
+   running"), `esc to interrupt`, and agy's `○ Running (…)` step for a command
+   it hasn't finished. If a round takes longer than `wait_timeout_secs`, or you
+   press `Ctrl+R` before every harness is done, whatever is on screen is used
+   and marked as unfinished. agent-tabs keeps watching those harnesses: when
+   one finishes, its section is updated, and once every answer is complete a
+   comparison that used unfinished answers runs again. A harness counted as
+   done that prints more without getting another prompt is watched again the
+   same way, and if its answer changed, the comparison runs again.
 2. When a harness is done, agent-tabs captures its text: the screen, plus for
    inline harnesses the scrollback since the prompt was sent, up to
    `max_lines` lines. From that it takes the harness's final message: the
@@ -167,13 +190,20 @@ Each harness gets a section with its status (`working`, `waiting for your
 answer`, `✓ done`) and its own answer, folded by default. A folded section
 shows the answer's last paragraph, which is usually the conclusion. The
 `comparison` section follows, unfolded. Click a section header to fold or
-unfold it. The text has no border, so it copies cleanly.
+unfold it. The text has no border, so it copies cleanly. Answers keep the
+colors and text styles the harness drew them in.
+
+Click the `⟳` in a harness's header (or press `Ctrl+L` on the focused
+section) to capture that harness's answer again right now and count it as
+done, for when agent-tabs got it wrong. If the answer changed, the comparison
+runs again. The `⟳` on the `comparison` header does the same as `Ctrl+R`.
 
 The tab marker shows the round's state: `⧗` waiting for answers, `…`
 summarizing, `●` a new summary you haven't looked at, `!` failed.
 
 The summary tab has its own prompt box at the bottom, always active: type a prompt
-and press `Enter` to send it to every ticked harness. All are ticked at first;
+and press `Enter` to send it to every ticked harness. All are ticked at first,
+except disabled harnesses that haven't been started;
 click a `[x] name` label in the box's title to untick or tick one, and the
 choice is kept for later prompts. `[x]` only means "send to this harness"; the
 tab markers show whether a harness is working. You can then watch the round
@@ -185,6 +215,7 @@ the tab's own commands use control keys:
 |---|---|
 | typing, `Enter` | Write a prompt and send it to all harnesses |
 | `Ctrl+R` | Summarize now, or re-run the round being viewed. With no rounds yet, summarizes what every harness currently shows |
+| `⟳` in a header, `Ctrl+L` | Capture that harness's answer again now (`Ctrl+L`: the focused section) |
 | `Ctrl+P` / `Ctrl+N` | Previous / next round |
 | `Tab` / `Shift+Tab` | Move focus between sections |
 | left click on a header, `Ctrl+O` | Fold or unfold that section (`Ctrl+O`: the focused one) |

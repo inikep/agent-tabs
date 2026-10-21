@@ -56,10 +56,6 @@ impl Composer {
         }
     }
 
-    pub fn select_all(&mut self) {
-        self.targets.iter_mut().for_each(|t| *t = true);
-    }
-
     pub fn clear(&mut self) {
         self.text.clear();
         self.cursor = 0;

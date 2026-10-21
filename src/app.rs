@@ -67,6 +67,7 @@ pub struct App {
     drag: Option<Drag>,
     clipboard: Clipboard,
     inputs: regex::RegexSet,
+    working: regex::RegexSet,
     summary_scroll: u16,
     summary_unseen: bool,
     model_patterns: Vec<Vec<regex::Regex>>,
@@ -109,6 +110,27 @@ pub fn is_prefix(key: &KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL)
         && matches!(key.code, KeyCode::Char('\\') | KeyCode::Char('4'))
 }
+
+/// A line of styled chars as spans, one per run of the same style.
+fn styled_line(prefix: &str, cells: crate::summary::Cells) -> Line<'static> {
+    let mut spans = vec![Span::raw(prefix.to_string())];
+    let mut run = String::new();
+    let mut style = Style::default();
+    for (c, cell_style) in cells {
+        if cell_style != style && !run.is_empty() {
+            spans.push(Span::styled(std::mem::take(&mut run), style));
+        }
+        style = cell_style;
+        run.push(c);
+    }
+    if !run.is_empty() {
+        spans.push(Span::styled(run, style));
+    }
+    Line::from(spans)
+}
+
+/// Drawn after the fold arrow of each summary section header.
+const REFRESH_BUTTON: &str = "⟳ ";
 
 fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
     use unicode_width::UnicodeWidthChar;
@@ -327,7 +349,7 @@ impl App {
         let clipboard = Clipboard::new(config.osc52, config.system_clipboard);
         let mut app = Self {
             panes: Vec::new(),
-            active: 0,
+            active: config.harnesses.len(),
             mode: Mode::Normal,
             composer: Composer::new(config.harnesses.len()),
             summary_input: Composer::new(config.harnesses.len()),
@@ -351,6 +373,7 @@ impl App {
             drag: None,
             clipboard,
             inputs: regex::RegexSet::empty(),
+            working: regex::RegexSet::empty(),
             summary_scroll: 0,
             summary_unseen: false,
             model_patterns: Vec::new(),
@@ -361,7 +384,7 @@ impl App {
         };
         app.dialogs = app.config.dialog_regex()?;
         app.inputs = app.config.input_regex()?;
-        app.summary_input.select_all();
+        app.working = app.config.working_regex()?;
         app.model_patterns = app
             .config
             .harnesses
@@ -370,9 +393,15 @@ impl App {
             .collect::<Result<_>>()?;
         let harnesses = app.config.harnesses.clone();
         for harness in harnesses {
-            let pane = app.spawn_pane(harness);
+            let pane = if harness.is_enabled() {
+                app.spawn_pane(harness)
+            } else {
+                Pane::stopped(harness, app.pane_size, app.config.scrollback)
+            };
             app.panes.push(pane);
         }
+        let defaults = app.default_targets();
+        app.summary_input.open(&defaults);
         Ok(app)
     }
 
@@ -473,6 +502,16 @@ impl App {
         }
     }
 
+    fn shows_trust_dialog(&self, index: usize) -> bool {
+        matches!(self.panes[index].status(), Status::Running)
+            && self.dialogs.is_match(&self.panes[index].screen_text())
+    }
+
+    fn still_working(&self, index: usize) -> bool {
+        matches!(self.panes[index].status(), Status::Running)
+            && self.working.is_match(&self.panes[index].screen_tail(25))
+    }
+
     fn needs_input(&self, index: usize) -> bool {
         matches!(self.panes[index].status(), Status::Running)
             && self.inputs.is_match(&self.panes[index].screen_tail(25))
@@ -523,6 +562,25 @@ impl App {
             Event::Resize(cols, rows) => self.resize(Size { cols, rows }),
             _ => {}
         }
+        self.start_checked();
+    }
+
+    /// Starts the disabled harnesses checked in a prompt box, which also shows
+    /// their tabs.
+    fn start_checked(&mut self) {
+        let mut checked = self.summary_input.selected();
+        if self.mode == Mode::Compose {
+            checked.extend(self.composer.selected());
+        }
+        let mut started = Vec::new();
+        for i in checked {
+            if self.start(i) {
+                started.push(self.panes[i].name().to_string());
+            }
+        }
+        if !started.is_empty() {
+            self.flash(format!("started {}", started.join(", ")));
+        }
     }
 
     pub fn resize(&mut self, size: Size) {
@@ -550,15 +608,38 @@ impl App {
         }
     }
 
+    /// The tabs in tab-bar order: the summary tab first, then the harnesses in
+    /// config order, leaving out disabled ones that have not been started.
+    fn visible_tabs(&self) -> Vec<usize> {
+        std::iter::once(self.summary_tab())
+            .chain((0..self.panes.len()).filter(|&i| self.panes[i].status() != Status::Stopped))
+            .collect()
+    }
+
+    fn select_position(&mut self, position: usize) {
+        if let Some(&index) = self.visible_tabs().get(position) {
+            self.select(index);
+        }
+    }
+
     fn cycle(&mut self, delta: isize) {
-        let n = self.summary_tab() as isize + 1;
-        let next = ((self.active as isize + delta).rem_euclid(n)) as usize;
-        self.select(next);
+        let tabs = self.visible_tabs();
+        let current = tabs.iter().position(|&i| i == self.active).unwrap_or(0);
+        let next = (current as isize + delta).rem_euclid(tabs.len() as isize) as usize;
+        self.select(tabs[next]);
+    }
+
+    /// The harnesses a prompt to all of them targets until toggled: all but
+    /// the disabled ones that have not been started.
+    fn default_targets(&self) -> Vec<usize> {
+        (0..self.panes.len())
+            .filter(|&i| self.panes[i].status() != Status::Stopped)
+            .collect()
     }
 
     fn open_composer(&mut self, all: bool) {
         let targets: Vec<usize> = if all || self.on_summary() {
-            (0..self.panes.len()).collect()
+            self.default_targets()
         } else {
             vec![self.active]
         };
@@ -567,14 +648,28 @@ impl App {
     }
 
     fn restart_active(&mut self) {
+        let name = self.panes[self.active].name().to_string();
+        if self.start(self.active) {
+            self.flash(format!("started {name}"));
+            return;
+        }
         let harness = self.panes[self.active].harness.clone();
-        let name = harness.name.clone();
         crate::pane::shutdown(
             std::slice::from_mut(&mut self.panes[self.active]),
             SHUTDOWN_GRACE,
         );
         self.panes[self.active] = self.spawn_pane(harness);
         self.flash(format!("restarted {name}"));
+    }
+
+    /// Starts a disabled harness that has not run yet. Returns whether it did.
+    fn start(&mut self, index: usize) -> bool {
+        if self.panes[index].status() != Status::Stopped {
+            return false;
+        }
+        let harness = self.panes[index].harness.clone();
+        self.panes[index] = self.spawn_pane(harness);
+        true
     }
 
     fn on_key(&mut self, key: KeyEvent) {
@@ -607,7 +702,7 @@ impl App {
         if key.modifiers == KeyModifiers::ALT
             && let KeyCode::Char(c @ '1'..='9') = key.code
         {
-            self.select(c as usize - '1' as usize);
+            self.select_position(c as usize - '1' as usize);
             return;
         }
         if self.on_summary() {
@@ -646,7 +741,7 @@ impl App {
             return;
         }
         match key.code {
-            KeyCode::Char(c @ '1'..='9') => self.select(c as usize - '1' as usize),
+            KeyCode::Char(c @ '1'..='9') => self.select_position(c as usize - '1' as usize),
             KeyCode::Char('n') | KeyCode::Right | KeyCode::Tab => self.cycle(1),
             KeyCode::Char('p') | KeyCode::Left | KeyCode::BackTab => self.cycle(-1),
             KeyCode::Char('a') | KeyCode::Char('b') => self.open_composer(true),
@@ -727,6 +822,9 @@ impl App {
         let delay = Duration::from_millis(self.config.submit_delay_ms);
         let mut sent = Vec::new();
         let mut queued = Vec::new();
+        for &i in targets {
+            self.start(i);
+        }
         if targets.len() >= 2 {
             self.start_round(text, targets);
         }
@@ -831,7 +929,7 @@ impl App {
                     .iter()
                     .position(|&(a, b)| mouse.column >= a && mouse.column < b)
             {
-                self.select(i);
+                self.select_position(i);
             }
             return;
         }
@@ -896,10 +994,14 @@ impl App {
     fn tab_label(&self, index: usize) -> (String, Style) {
         let pane = &self.panes[index];
         let (marker, color) = match pane.status() {
+            Status::Running if self.shows_trust_dialog(index) => ('⚑', Color::Yellow),
             Status::Running if self.has_pending(index) => ('⧗', Color::Yellow),
             Status::Running if self.needs_input(index) => ('?', Color::Magenta),
-            Status::Running if pane.is_busy(BUSY_WINDOW) => ('●', Color::Green),
+            Status::Running if pane.is_busy(BUSY_WINDOW) || self.still_working(index) => {
+                ('●', Color::Green)
+            }
             Status::Running => (' ', Color::Reset),
+            Status::Stopped => ('○', Color::DarkGray),
             Status::Exited(_) => ('✗', Color::Red),
             Status::Failed(_) => ('!', Color::Red),
         };
@@ -923,18 +1025,21 @@ impl App {
         let mut spans = Vec::new();
         self.tab_spans.clear();
         let mut x = tabs_area.x;
-        for i in 0..self.panes.len() {
-            let (text, style) = self.tab_label(i);
+        for (position, index) in self.visible_tabs().into_iter().enumerate() {
+            let (text, style) = if index == self.summary_tab() {
+                self.summary_tab_label()
+            } else {
+                self.tab_label(index)
+            };
+            if position > 0 {
+                spans.push(Span::raw(" │ ").dark_gray());
+                x += 3;
+            }
             let width = text.width() as u16;
             self.tab_spans.push((x, x + width));
-            x += width + 3;
+            x += width;
             spans.push(Span::styled(text, style));
-            spans.push(Span::raw(" │ ").dark_gray());
         }
-        let (text, style) = self.summary_tab_label();
-        let width = text.width() as u16;
-        self.tab_spans.push((x, x + width));
-        spans.push(Span::styled(text, style));
         frame.render_widget(Paragraph::new(Line::from(spans)), tabs_area);
         let exit = " ✕ exit ";
         let exit_width = exit.width() as u16;
@@ -995,7 +1100,19 @@ impl App {
                 pane_area,
             );
             None
+        } else if pane.status() == Status::Stopped {
+            let text = format!(
+                "{} is disabled (enabled = false), so it was not started.\n\n\
+                 Ctrl+\\ r starts it, as does checking it in a prompt box.",
+                pane.name()
+            );
+            frame.render_widget(
+                Paragraph::new(text).dark_gray().wrap(Wrap { trim: false }),
+                pane_area,
+            );
+            None
         } else {
+            pane.restore_selection();
             let cursor = match pane.term.lock() {
                 Ok(term) => draw_term(&term, pane_area, frame.buffer_mut()),
                 Err(_) => None,
@@ -1139,17 +1256,7 @@ impl App {
         hits.retain(|h| h.kind != kind);
         for (i, pane) in self.panes.iter().enumerate() {
             let on = composer.targets[i];
-            let label = format!(
-                "[{}] {}{} ",
-                if on { "x" } else { " " },
-                pane.name(),
-                match self.readiness(i) {
-                    Readiness::Ready => "",
-                    Readiness::NoPaste => " (starting)",
-                    Readiness::Dialog => " (dialog open)",
-                    Readiness::NotRunning => " (not running)",
-                }
-            );
+            let label = format!("[{}] {} ", if on { "x" } else { " " }, pane.name());
             let width = label.width() as u16;
             hits.push(TargetHit {
                 kind,
@@ -1220,7 +1327,7 @@ impl App {
             Line::from("  Ctrl+A toggle all · ↑/↓ history · Esc cancel"),
             Line::from(""),
             Line::from(
-                "Tab markers: ● output · ⧗ prompt queued · ? waiting for your answer · ✗ exited",
+                "Tab markers: ● output · ⚑ trust the folder · ⧗ prompt queued · ? waiting for your answer · ✗ exited",
             ),
             Line::from("Summary tab: a prompt sent to 2+ harnesses is compared once all go quiet."),
             Line::from(
@@ -1271,27 +1378,43 @@ impl App {
         let Some(round) = self.rounds.last_mut() else {
             return;
         };
-        if round.state() != SummaryState::Waiting {
-            return;
-        }
-        if let Some(slot) = round.slot(pane)
-            && round.delivered[slot].is_none()
-        {
-            round.delivered[slot] = Some((Instant::now(), mark));
+        if let Some(slot) = round.slot(pane) {
+            if round.delivered[slot].is_some() {
+                round.followed_up[slot] = true;
+            } else if round.state() == SummaryState::Waiting {
+                round.delivered[slot] = Some((Instant::now(), mark));
+            }
         }
     }
 
     fn capture(&self, pane: usize, mark: usize, finished: bool) -> Capture {
-        let text = self.panes[pane].text_since(mark, self.config.summary.max_lines);
+        let lines = self.panes[pane].styled_since(mark, self.config.summary.max_lines);
+        let text = lines
+            .iter()
+            .map(|(text, _)| text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         let text = if self.panes[pane].harness.strips_right_panel() {
             crate::summary::strip_right_panel(&text)
         } else {
             text
         };
+        // Stripping a side panel keeps one line per line, so cut each line's
+        // styles to its stripped text.
+        let styles = text
+            .lines()
+            .zip(lines)
+            .map(|(line, (_, mut styles))| {
+                styles.truncate(line.chars().count());
+                (line.to_string(), styles)
+            })
+            .collect();
         Capture {
             text,
             finished,
             model: self.model_of(pane),
+            at: Instant::now(),
+            styles,
         }
     }
 
@@ -1331,7 +1454,7 @@ impl App {
             return false;
         };
         let state = self.rounds[index].state();
-        if state == SummaryState::Superseded || self.rounds[index].all_finished() {
+        if state == SummaryState::Superseded {
             return false;
         }
         let quiet = Duration::from_secs(self.config.summary.quiet_secs);
@@ -1343,6 +1466,7 @@ impl App {
                 .as_ref()
                 .map(|c| c.finished);
             if existing == Some(true) {
+                changed |= self.reopen_if_resumed(index, slot);
                 continue;
             }
             let pane = self.rounds[index].targets[slot];
@@ -1351,7 +1475,8 @@ impl App {
                 Some((at, mark)) => {
                     let quiet_now = at.elapsed() >= quiet
                         && !self.panes[pane].is_busy(quiet)
-                        && !self.needs_input(pane);
+                        && !self.needs_input(pane)
+                        && !self.still_working(pane);
                     if !running || quiet_now {
                         Some(self.capture(pane, mark, true))
                     } else if timed_out && existing.is_none() {
@@ -1367,7 +1492,7 @@ impl App {
             };
             if let Some(capture) = capture {
                 self.log_capture(index, slot, &capture);
-                self.rounds[index].captures[slot] = Some(capture);
+                self.store_capture(index, slot, capture);
                 changed = true;
             }
         }
@@ -1384,6 +1509,49 @@ impl App {
             _ => {}
         }
         changed
+    }
+
+    /// Stores a capture. A reopened harness whose answer changed gets its
+    /// round compared again once every answer is in.
+    fn store_capture(&mut self, index: usize, slot: usize, capture: Capture) {
+        let round = &mut self.rounds[index];
+        let finished = capture.finished;
+        round.captures[slot] = Some(capture);
+        if !finished {
+            return;
+        }
+        let Some(before) = round.reopened[slot].take() else {
+            return;
+        };
+        let words = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let answer = round.answer(slot).unwrap_or_default();
+        if words(&answer) != words(&before) && round.state() != SummaryState::Waiting {
+            round.compared_unfinished = true;
+        }
+    }
+
+    /// A harness counted as done that produces output again, without another
+    /// prompt, was not done after all (agy, for one, goes quiet while a
+    /// command runs). Watch it again; a changed answer is compared again.
+    fn reopen_if_resumed(&mut self, index: usize, slot: usize) -> bool {
+        let round = &self.rounds[index];
+        let pane = &self.panes[round.targets[slot]];
+        let Some(capture) = round.captures[slot].as_ref() else {
+            return false;
+        };
+        let resumed = !round.followed_up[slot]
+            && pane.status() == Status::Running
+            && pane.last_output().is_some_and(|t| t > capture.at);
+        if !resumed {
+            return false;
+        }
+        let before = round.answer(slot).unwrap_or_default();
+        let round = &mut self.rounds[index];
+        round.reopened[slot] = Some(before);
+        if let Some(capture) = round.captures[slot].as_mut() {
+            capture.finished = false;
+        }
+        true
     }
 
     fn spawn_summary_job(
@@ -1504,6 +1672,9 @@ impl App {
             KeyCode::Char('r') if ctrl => self.regenerate_summary(),
             KeyCode::Char('p') if ctrl => self.view_round(self.summary_view.saturating_sub(1)),
             KeyCode::Char('n') if ctrl => self.view_round((self.summary_view + 1).min(last)),
+            KeyCode::Char('l') if ctrl && sections > 0 => {
+                self.refresh_section(self.summary_focus.min(sections - 1));
+            }
             KeyCode::Char('o') if ctrl && sections > 0 => {
                 self.toggle_section(self.summary_focus.min(sections - 1));
             }
@@ -1610,6 +1781,9 @@ impl App {
                 Color::Magenta,
             ),
             Some(_) => ("captured unfinished".into(), Color::Yellow),
+            None if round.delivered[slot].is_none() && self.shows_trust_dialog(pane) => {
+                ("waiting for you to trust the folder".into(), Color::Yellow)
+            }
             None if round.delivered[slot].is_none() => ("prompt queued".into(), Color::Yellow),
             None if self.needs_input(pane) => ("waiting for your answer".into(), Color::Magenta),
             None if self.panes[pane]
@@ -1617,6 +1791,7 @@ impl App {
             {
                 ("working".into(), Color::Green)
             }
+            None if self.still_working(pane) => ("working in the background".into(), Color::Green),
             None => ("settling".into(), Color::Green),
         }
     }
@@ -1629,11 +1804,15 @@ impl App {
         headline: Option<&str>,
     ) -> Line<'static> {
         let folded = self.summary_folded.get(index).copied().unwrap_or(false);
-        let mut name = Span::raw(format!("{} {label}", if folded { "▸" } else { "▾" })).bold();
+        let mut name = Span::raw(label).bold();
         if index == self.summary_focus {
             name = name.reversed();
         }
+        // The arrow and the refresh button sit in fixed columns so a click can
+        // tell them apart (see `summary_click`).
         let mut spans = vec![
+            Span::raw(if folded { "▸ " } else { "▾ " }).bold(),
+            Span::raw(REFRESH_BUTTON).cyan(),
             name,
             Span::raw("  "),
             Span::styled(status.0, Style::default().fg(status.1)),
@@ -1672,7 +1851,10 @@ impl App {
                 ))
                 .bold(),
                 Span::raw(format!("  ·  {}", round.names.join(", "))).dark_gray(),
-                Span::raw("   click or Ctrl+O to fold · Tab focus · Ctrl+E fold all").dark_gray(),
+                Span::raw(
+                    "   click or Ctrl+O to fold · ⟳ or Ctrl+L refresh · Tab focus · Ctrl+E fold all",
+                )
+                .dark_gray(),
             ]),
             Line::from(""),
         ]);
@@ -1704,9 +1886,11 @@ impl App {
                     lines.push((Line::from("    (no answer captured)").dark_gray(), None));
                 }
                 lines.extend(
-                    crate::summary::reflow(answer)
+                    round
+                        .answer_lines(slot)
+                        .unwrap_or_default()
                         .into_iter()
-                        .map(|l| (Line::from(format!("    {l}")), None)),
+                        .map(|cells| (styled_line("    ", cells), None)),
                 );
             }
             lines.push((Line::from(""), None));
@@ -1926,8 +2110,53 @@ impl App {
             return;
         }
         let index = (row - area.y) as usize + self.summary_scroll as usize;
-        if let Some(Some(section)) = self.summary_hits.get(index).copied() {
+        let Some(Some(section)) = self.summary_hits.get(index).copied() else {
+            return;
+        };
+        let first_row = index == 0 || self.summary_hits[index - 1] != Some(section);
+        let x = (column - area.x) as usize;
+        if first_row && (2..2 + REFRESH_BUTTON.trim_end().width()).contains(&x) {
+            self.refresh_section(section);
+        } else {
             self.toggle_section(section);
+        }
+    }
+
+    /// Captures a harness's answer again now, as finished; for the comparison
+    /// section, compares again. A changed answer is compared again.
+    fn refresh_section(&mut self, section: usize) {
+        let Some(index) = self.rounds.len().checked_sub(1) else {
+            return;
+        };
+        let index = self.summary_view.min(index);
+        let round = &self.rounds[index];
+        if section >= round.targets.len() {
+            self.regenerate_summary();
+            return;
+        }
+        let pane = round.targets[section];
+        let name = self.panes[pane].name().to_string();
+        let Some((_, mark)) = round.delivered[section] else {
+            self.flash(format!("the prompt has not reached {name} yet"));
+            return;
+        };
+        let before = round.answer(section);
+        let capture = self.capture(pane, mark, true);
+        self.log_capture(index, section, &capture);
+        self.rounds[index].reopened[section] = before;
+        self.store_capture(index, section, capture);
+        let round = &self.rounds[index];
+        let rerun = round.compared_unfinished
+            && round.all_finished()
+            && matches!(
+                round.state(),
+                SummaryState::Done { .. } | SummaryState::Failed(_)
+            );
+        if rerun {
+            self.start_summarizer(index);
+            self.flash(format!("refreshed {name}; comparing again"));
+        } else {
+            self.flash(format!("refreshed {name}"));
         }
     }
 
@@ -1994,16 +2223,19 @@ mod tests {
             yolo: false,
             dialog_patterns: crate::config::default_dialog_patterns(),
             input_patterns: crate::config::default_input_patterns(),
+            working_patterns: crate::config::default_working_patterns(),
             summary: test_summary(),
             harnesses,
         };
-        App::new(
+        let mut app = App::new(
             config,
             PathBuf::from("."),
             None,
             Size { cols: 60, rows: 12 },
         )
-        .unwrap()
+        .unwrap();
+        app.select(0);
+        app
     }
 
     fn wait_until(app: &mut App, mut done: impl FnMut(&App) -> bool) {
@@ -2154,16 +2386,16 @@ mod tests {
         compose_all(&mut app, "what now");
         wait_summary(&mut app, "SUMMARY:2");
         let text = summary_text(&app);
-        assert!(text.contains("▸ a  ✓ done  — • answer from a"), "{text}");
+        assert!(text.contains("▸ ⟳ a  ✓ done  — • answer from a"), "{text}");
         assert!(!text.contains("    • answer from a"), "{text}");
-        assert!(text.contains("▾ comparison"), "{text}");
+        assert!(text.contains("▾ ⟳ comparison"), "{text}");
         assert_eq!(app.rounds[0].answer(0).unwrap(), "• answer from a");
 
-        app.handle_event(key(KeyCode::Char('3'), KeyModifiers::ALT));
+        app.handle_event(key(KeyCode::Char('1'), KeyModifiers::ALT));
         app.handle_event(key(KeyCode::Char('o'), KeyModifiers::CONTROL));
         let text = summary_text(&app);
         assert!(
-            text.contains("▾ a  ✓ done\n    • answer from a") && !text.contains("Ran ls"),
+            text.contains("▾ ⟳ a  ✓ done\n    • answer from a") && !text.contains("Ran ls"),
             "{text}"
         );
         app.handle_event(key(KeyCode::Char('e'), KeyModifiers::CONTROL));
@@ -2178,7 +2410,7 @@ mod tests {
         thread::sleep(Duration::from_millis(200));
         compose_all(&mut app, "click test");
         wait_summary(&mut app, "SUMMARY:2");
-        app.handle_event(key(KeyCode::Char('3'), KeyModifiers::ALT));
+        app.handle_event(key(KeyCode::Char('1'), KeyModifiers::ALT));
         let buf = draw_app(&mut app, 60, 20);
         let rows = buffer_rows(&buf);
         assert!(
@@ -2187,21 +2419,25 @@ mod tests {
         );
         let header = rows
             .iter()
-            .position(|r| r.starts_with("▸ b"))
+            .position(|r| r.starts_with("▸ ⟳ b"))
             .expect("b header");
         app.handle_event(Event::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            column: 2,
+            column: 5,
             row: header as u16,
             modifiers: KeyModifiers::NONE,
         }));
         mouse(
             &mut app,
             MouseEventKind::Up(MouseButton::Left),
-            2,
+            5,
             header as u16,
         );
-        assert!(summary_text(&app).contains("▾ b"), "{}", summary_text(&app));
+        assert!(
+            summary_text(&app).contains("▾ ⟳ b"),
+            "{}",
+            summary_text(&app)
+        );
         let rows = buffer_rows(&draw_app(&mut app, 60, 20));
         assert!(
             rows.iter().any(|r| r.starts_with("    • answer from b")),
@@ -2244,12 +2480,37 @@ mod tests {
     }
 
     #[test]
+    fn dragging_in_scrollback_survives_a_harness_redrawing_its_screen() {
+        // An Ink app (cursor-agent) redraws its live area by erasing every line
+        // and writing it again, which drops any selection that touches it.
+        let script = "for i in $(seq 1 40); do printf 'line %s\\r\\n' $i; done; \
+            while true; do for j in $(seq 1 9); do printf '\\033[2K\\033[1A'; done; \
+            printf '\\033[2K\\033[G'; for j in $(seq 1 9); do printf 'live %s\\r\\n' $j; done; \
+            printf 'footer %s' $RANDOM; sleep 0.02; done";
+        let mut app = app_with(vec![script_harness("ink", script)]);
+        wait_for(app.pane(0), "footer");
+        for _ in 0..3 {
+            mouse(&mut app, MouseEventKind::ScrollUp, 5, 5);
+        }
+        assert_eq!(app.mode(), Mode::Scroll);
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 0, 2);
+        thread::sleep(Duration::from_millis(100));
+        mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), 3, 11);
+        thread::sleep(Duration::from_millis(100));
+        mouse(&mut app, MouseEventKind::Up(MouseButton::Left), 3, 11);
+        let copied = app.clipboard.last.clone().unwrap_or_default();
+        assert!(copied.starts_with("line "), "{copied:?}");
+        // The last selected lines may be mid-redraw when the button comes up.
+        assert!(copied.lines().count() >= 6, "{copied:?}");
+    }
+
+    #[test]
     fn dragging_in_summary_copies_and_click_still_folds() {
         let mut app = app_with(vec![replying_harness("a"), replying_harness("b")]);
         thread::sleep(Duration::from_millis(200));
         compose_all(&mut app, "copy test");
         wait_summary(&mut app, "SUMMARY:2");
-        app.handle_event(key(KeyCode::Char('3'), KeyModifiers::ALT));
+        app.handle_event(key(KeyCode::Char('1'), KeyModifiers::ALT));
         let rows = buffer_rows(&draw_app(&mut app, 60, 20));
         let prompt_row = rows
             .iter()
@@ -2275,10 +2536,10 @@ mod tests {
         );
         assert_eq!(app.clipboard.last.as_deref(), Some("copy test"));
         let rows = buffer_rows(&draw_app(&mut app, 60, 20));
-        let header = rows.iter().position(|r| r.starts_with("▸ a")).unwrap() as u16;
+        let header = rows.iter().position(|r| r.starts_with("▸ ⟳ a")).unwrap() as u16;
         mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 1, header);
         mouse(&mut app, MouseEventKind::Up(MouseButton::Left), 1, header);
-        assert!(summary_text(&app).contains("▾ a"));
+        assert!(summary_text(&app).contains("▾ ⟳ a"));
     }
 
     fn click(app: &mut App, column: u16, row: u16) {
@@ -2300,7 +2561,7 @@ mod tests {
     fn clicking_a_target_in_the_summary_prompt_box_toggles_it() {
         let mut app = app(&["a", "b", "c"]);
         thread::sleep(Duration::from_millis(200));
-        app.handle_event(key(KeyCode::Char('4'), KeyModifiers::ALT));
+        app.handle_event(key(KeyCode::Char('1'), KeyModifiers::ALT));
         let rows = buffer_rows(&draw_app(&mut app, 100, 20));
         let (x, y) = find(&rows, "[x] b");
         click(&mut app, x + 1, y);
@@ -2344,6 +2605,7 @@ mod tests {
             yolo: true,
             dialog_patterns: crate::config::default_dialog_patterns(),
             input_patterns: crate::config::default_input_patterns(),
+            working_patterns: crate::config::default_working_patterns(),
             summary: test_summary(),
             harnesses: vec![script_harness("p", "printf 'args:%s' \"$*\"; sleep 5")],
         };
@@ -2444,7 +2706,7 @@ mod tests {
     #[test]
     fn prompt_box_shows_wrapped_long_text() {
         let mut app = app(&["a", "b"]);
-        app.handle_event(key(KeyCode::Char('3'), KeyModifiers::ALT));
+        app.handle_event(key(KeyCode::Char('1'), KeyModifiers::ALT));
         let long = "word ".repeat(40);
         app.handle_event(Event::Paste(long.trim_end().to_string()));
         let rows = buffer_rows(&draw_app(&mut app, 40, 30));
@@ -2470,7 +2732,7 @@ mod tests {
         thread::sleep(Duration::from_millis(200));
         compose_all(&mut app, "long task");
         wait_for(app.pane(1), "working 2");
-        app.handle_event(key(KeyCode::Char('3'), KeyModifiers::ALT));
+        app.handle_event(key(KeyCode::Char('1'), KeyModifiers::ALT));
         app.handle_event(key(KeyCode::Char('r'), KeyModifiers::CONTROL));
         assert!(app.rounds[0].compared_unfinished);
         assert!(!app.rounds[0].captures[1].as_ref().unwrap().finished);
@@ -2481,10 +2743,103 @@ mod tests {
         assert!(!app.rounds[0].compared_unfinished);
         assert!(app.rounds[0].answer(1).unwrap().ends_with("• final answer"));
         assert!(
-            summary_text(&app).contains("▸ slow  ✓ done  — • final answer"),
+            summary_text(&app).contains("▸ ⟳ slow  ✓ done  — • final answer"),
             "{}",
             summary_text(&app)
         );
+    }
+
+    #[test]
+    fn done_harness_that_resumes_is_recaptured_and_compared_again() {
+        let pause = "printf '\\033[?2004h'; stty -echo; read l; printf '› %s\\r\\n• launched the tests\\r\\n' \"$l\"; sleep 2.5; printf '• final answer\\r\\n› Ask me\\r\\n'; sleep 30";
+        let mut app = app_with(vec![
+            replying_harness("fast"),
+            script_harness("pause", pause),
+        ]);
+        app.config.summary.args = vec![
+            "-c".into(),
+            "printf 'FINAL:'; grep -c 'final answer'".into(),
+        ];
+        thread::sleep(Duration::from_millis(200));
+        compose_all(&mut app, "run the tests");
+        app.select(app.summary_tab());
+        wait_summary(&mut app, "FINAL:0");
+        assert!(
+            app.rounds[0]
+                .answer(1)
+                .unwrap()
+                .ends_with("launched the tests")
+        );
+        wait_summary(&mut app, "FINAL:1");
+        assert!(app.rounds[0].all_finished());
+        assert!(app.rounds[0].answer(1).unwrap().ends_with("• final answer"));
+    }
+
+    #[test]
+    fn refresh_button_recaptures_one_harness_and_compares_again() {
+        // `late` goes quiet long enough to count as done, then prints more
+        // output that is too quick to be noticed before the refresh.
+        let late = "printf '\\033[?2004h'; stty -echo; read l; printf '› %s\\r\\n• first take\\r\\n' \"$l\"; read x; printf '• better take\\r\\n'; sleep 30";
+        let mut app = app_with(vec![replying_harness("fast"), script_harness("late", late)]);
+        app.config.summary.args = vec![
+            "-c".into(),
+            "printf 'BETTER:'; grep -c 'better take'".into(),
+        ];
+        thread::sleep(Duration::from_millis(200));
+        compose_all(&mut app, "go");
+        app.select(app.summary_tab());
+        wait_summary(&mut app, "BETTER:0");
+        // Make the round's answer change without the harness being reopened.
+        app.rounds[0].followed_up[1] = true;
+        app.pane(1).write(b"\r");
+        wait_for(app.pane(1), "better take");
+        let rows = buffer_rows(&draw_app(&mut app, 80, 30));
+        let header = rows.iter().position(|r| r.starts_with("▸ ⟳ late")).unwrap() as u16;
+        click(&mut app, 2, header);
+        assert!(app.rounds[0].answer(1).unwrap().ends_with("• better take"));
+        wait_summary(&mut app, "BETTER:1");
+
+        app.summary_focus = 0;
+        app.handle_event(key(KeyCode::Char('l'), KeyModifiers::CONTROL));
+        assert!(app.rounds[0].captures[0].as_ref().unwrap().finished);
+    }
+
+    #[test]
+    fn summary_answer_keeps_the_harness_colors() {
+        let colored = "printf '\\033[?2004h'; stty -echo; read l; printf '› %s\\r\\n• plain \\033[31mred\\033[0m\\r\\n' \"$l\"; sleep 30";
+        let mut app = app_with(vec![replying_harness("a"), script_harness("c", colored)]);
+        thread::sleep(Duration::from_millis(200));
+        compose_all(&mut app, "colors");
+        app.select(app.summary_tab());
+        wait_summary(&mut app, "SUMMARY:2");
+        let toggle = app.summary_folded.get(1).copied().unwrap_or(false);
+        if toggle {
+            app.toggle_section(1);
+        }
+        let buf = draw_app(&mut app, 80, 30);
+        let rows = buffer_rows(&buf);
+        let (x, y) = find(&rows, "• plain red");
+        let red = (x + "• plain ".chars().count() as u16, y);
+        assert_eq!(buf[red].fg, Color::Indexed(1), "{rows:#?}");
+        assert_eq!(buf[(x + 2, y)].fg, Color::Reset);
+    }
+
+    #[test]
+    fn a_follow_up_prompt_does_not_reopen_the_round() {
+        let mut app = app_with(vec![replying_harness("a"), replying_harness("b")]);
+        thread::sleep(Duration::from_millis(200));
+        compose_all(&mut app, "first");
+        wait_summary(&mut app, "SUMMARY:2");
+        app.select(0);
+        app.handle_event(key(KeyCode::Char('\\'), KeyModifiers::CONTROL));
+        app.handle_event(key(KeyCode::Char('s'), KeyModifiers::NONE));
+        type_text(&mut app, "second");
+        app.handle_event(key(KeyCode::Enter, KeyModifiers::NONE));
+        wait_for(app.pane(0), "› second");
+        thread::sleep(Duration::from_millis(300));
+        app.tick_summary();
+        assert!(app.rounds[0].followed_up[0]);
+        assert!(app.rounds[0].all_finished());
     }
 
     #[test]
@@ -2513,6 +2868,34 @@ mod tests {
     }
 
     #[test]
+    fn background_work_keeps_a_harness_from_being_done() {
+        let script = format!(
+            "printf '\\033[?2004h'; read l; printf '• partial\\r\\n✻ done · 1 shell, 1 monitor still running\\r\\n'; sleep 2.5; printf '\\033[2J\\033[H› %s\\r\\n• final answer\\r\\n────────────────\\r\\n› Ask me\\r\\n' \"$l\"; {ECHO_LOOP}"
+        );
+        let mut app = app_with(vec![cat_harness("a"), script_harness("bg", &script)]);
+        thread::sleep(Duration::from_millis(200));
+        compose_all(&mut app, "go");
+        wait_for(app.pane(1), "still running");
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_millis(2000) {
+            app.tick_summary();
+            assert!(
+                app.rounds[0].captures[1].is_none(),
+                "captured while background work was running"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            summary_text(&app).contains("working in the background"),
+            "{}",
+            summary_text(&app)
+        );
+        assert_eq!(app.tab_label(1).0, "●bg");
+        wait_summary(&mut app, "SUMMARY:2");
+        assert_eq!(app.rounds[0].answer(1).as_deref(), Some("• final answer"));
+    }
+
+    #[test]
     fn single_target_prompt_does_not_start_a_round() {
         let mut app = app(&["a", "b"]);
         thread::sleep(Duration::from_millis(200));
@@ -2527,7 +2910,7 @@ mod tests {
     fn summary_tab_r_summarizes_current_screens() {
         let mut app = app(&["a", "b"]);
         thread::sleep(Duration::from_millis(200));
-        app.handle_event(key(KeyCode::Char('3'), KeyModifiers::ALT));
+        app.handle_event(key(KeyCode::Char('1'), KeyModifiers::ALT));
         assert!(app.on_summary());
         assert!(summary_text(&app).contains("No summaries yet"));
         app.handle_event(key(KeyCode::Char('r'), KeyModifiers::CONTROL));
@@ -2538,14 +2921,14 @@ mod tests {
     fn typing_in_summary_tab_sends_to_all_harnesses() {
         let mut app = app(&["a", "b", "c"]);
         thread::sleep(Duration::from_millis(200));
-        app.handle_event(key(KeyCode::Char('4'), KeyModifiers::ALT));
+        app.handle_event(key(KeyCode::Char('1'), KeyModifiers::ALT));
         assert!(app.on_summary());
         type_text(&mut app, "ready");
         app.handle_event(Event::Paste(" set".into()));
         assert_eq!(app.summary_input.text(), "ready set");
-        app.handle_event(key(KeyCode::Char('1'), KeyModifiers::ALT));
+        app.handle_event(key(KeyCode::Char('2'), KeyModifiers::ALT));
         assert!(!app.on_summary(), "Alt+digit still switches tabs");
-        app.handle_event(key(KeyCode::Char('4'), KeyModifiers::ALT));
+        app.handle_event(key(KeyCode::Char('1'), KeyModifiers::ALT));
         app.handle_event(key(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.on_summary());
         assert_eq!(app.summary_input.text(), "");
@@ -2559,7 +2942,7 @@ mod tests {
     #[test]
     fn summary_tab_keeps_commands_on_control_keys() {
         let mut app = app(&["a", "b"]);
-        app.handle_event(key(KeyCode::Char('3'), KeyModifiers::ALT));
+        app.handle_event(key(KeyCode::Char('1'), KeyModifiers::ALT));
         type_text(&mut app, "rpn");
         assert_eq!(app.summary_input.text(), "rpn");
         assert!(app.rounds.is_empty());
@@ -2568,7 +2951,7 @@ mod tests {
         app.handle_event(key(KeyCode::PageDown, KeyModifiers::NONE));
         assert!(app.summary_scroll > 0);
         app.handle_event(key(KeyCode::Char('\\'), KeyModifiers::CONTROL));
-        app.handle_event(key(KeyCode::Char('1'), KeyModifiers::NONE));
+        app.handle_event(key(KeyCode::Char('2'), KeyModifiers::NONE));
         assert_eq!(app.active(), 0);
     }
 
@@ -2581,6 +2964,33 @@ mod tests {
         assert_eq!(app.rounds.len(), 2);
         assert_eq!(app.rounds[0].state(), SummaryState::Superseded);
         assert_eq!(app.rounds[1].state(), SummaryState::Waiting);
+    }
+
+    #[test]
+    fn trust_dialog_is_marked_on_the_tab_not_in_the_prompt_box() {
+        let dialog = "printf 'Do you trust the contents of this project?'; sleep 5";
+        let mut app = app_with(vec![script_harness("asks", dialog), cat_harness("ready")]);
+        wait_for(app.pane(0), "Do you trust");
+        assert_eq!(app.tab_label(0).0, "⚑asks");
+        app.handle_event(key(KeyCode::Char('1'), KeyModifiers::ALT));
+        let rows = buffer_rows(&draw_app(&mut app, 100, 20));
+        assert!(
+            rows.iter().any(|r| r.contains("[x] asks [x] ready")),
+            "{rows:#?}"
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|r| r.contains("dialog open") || r.contains("(starting)")),
+            "{rows:#?}"
+        );
+        compose_all(&mut app, "hi");
+        assert_eq!(app.tab_label(0).0, "⚑asks");
+        assert!(
+            summary_text(&app).contains("asks  waiting for you to trust the folder"),
+            "{}",
+            summary_text(&app)
+        );
     }
 
     #[test]
@@ -2621,16 +3031,21 @@ mod tests {
             yolo: false,
             dialog_patterns: crate::config::default_dialog_patterns(),
             input_patterns: crate::config::default_input_patterns(),
+            working_patterns: crate::config::default_working_patterns(),
             summary: test_summary(),
             harnesses: names.iter().map(|n| cat_harness(n)).collect(),
         };
-        App::new(
+        let mut app = App::new(
             config,
             PathBuf::from("."),
             None,
             Size { cols: 60, rows: 12 },
         )
-        .unwrap()
+        .unwrap();
+        // Most tests type into the first harness, so start there rather than
+        // on the summary tab.
+        app.select(0);
+        app
     }
 
     fn key(code: KeyCode, mods: KeyModifiers) -> Event {
@@ -2671,16 +3086,91 @@ mod tests {
         app.handle_event(key(KeyCode::Char('\\'), KeyModifiers::CONTROL));
         assert_eq!(app.mode(), Mode::Prefix);
         app.handle_event(key(KeyCode::Char('3'), KeyModifiers::NONE));
-        assert_eq!(app.active(), 2);
+        assert_eq!(app.active(), 1, "tab 1 is the summary, tab 3 is harness b");
         app.handle_event(key(KeyCode::Char('4'), KeyModifiers::CONTROL));
         app.handle_event(key(KeyCode::Char('n'), KeyModifiers::NONE));
-        assert_eq!(app.active(), 3, "the summary tab follows the harness tabs");
+        assert_eq!(app.active(), 2);
+        app.handle_event(key(KeyCode::Char('\\'), KeyModifiers::CONTROL));
+        app.handle_event(key(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert!(
+            app.on_summary(),
+            "next after the last harness wraps to the summary"
+        );
         app.handle_event(key(KeyCode::Char('\\'), KeyModifiers::CONTROL));
         app.handle_event(key(KeyCode::Char('n'), KeyModifiers::NONE));
         assert_eq!(app.active(), 0);
+        app.handle_event(key(KeyCode::Char('1'), KeyModifiers::ALT));
+        assert!(app.on_summary());
         app.handle_event(key(KeyCode::Char('2'), KeyModifiers::ALT));
-        assert_eq!(app.active(), 1);
+        assert_eq!(app.active(), 0);
         assert_eq!(app.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn disabled_harnesses_are_hidden_until_checked_in_a_prompt_box() {
+        let mut harnesses = vec![cat_harness("a"), cat_harness("b"), cat_harness("c")];
+        harnesses[1].enabled = Some(false);
+        harnesses[2].enabled = Some(false);
+        let mut app = app_with(harnesses);
+        assert_eq!(app.pane(1).status(), Status::Stopped);
+        assert_eq!(app.visible_tabs(), [3, 0]);
+        assert_eq!(app.summary_input.selected(), [0]);
+        app.select(3);
+        let rows = buffer_rows(&draw_app(&mut app, 100, 20));
+        assert!(
+            !rows[0].contains(" b ") && !rows[0].contains('c'),
+            "{:?}",
+            rows[0]
+        );
+        app.handle_event(key(KeyCode::Char('3'), KeyModifiers::ALT));
+        assert!(app.on_summary(), "Alt+3 is not a hidden tab");
+
+        let (x, y) = find(&rows, "[ ] c");
+        click(&mut app, x + 1, y);
+        assert_eq!(
+            app.pane(2).status(),
+            Status::Running,
+            "checking it starts it"
+        );
+        assert_eq!(app.visible_tabs(), [3, 0, 2]);
+        let rows = buffer_rows(&draw_app(&mut app, 100, 20));
+        assert!(rows[0].contains('c'), "{:?}", rows[0]);
+
+        app.select(0);
+        app.handle_event(key(KeyCode::Char('\\'), KeyModifiers::CONTROL));
+        app.handle_event(key(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert_eq!(app.composer.selected(), [0, 2]);
+        assert_eq!(app.pane(1).status(), Status::Stopped);
+        app.handle_event(key(KeyCode::Char('2'), KeyModifiers::ALT));
+        assert_eq!(app.pane(1).status(), Status::Running);
+        type_text(&mut app, "hello");
+        app.handle_event(key(KeyCode::Enter, KeyModifiers::NONE));
+        wait_until(&mut app, |a| !a.has_pending(1));
+        wait_for(app.pane(1), "got:hello");
+        assert_eq!(app.visible_tabs(), [3, 0, 1, 2]);
+    }
+
+    #[test]
+    fn summary_is_the_first_tab_and_the_starting_one() {
+        let mut app = app(&["a", "b"]);
+        let rows = buffer_rows(&draw_app(&mut app, 80, 10));
+        let summary = rows[0].find("summary").unwrap();
+        assert!(summary < rows[0].find('a').unwrap(), "{:?}", rows[0]);
+        click(&mut app, summary as u16 + 1, 0);
+        assert!(app.on_summary());
+
+        let config = Config {
+            harnesses: vec![cat_harness("a")],
+            ..app.config.clone()
+        };
+        let fresh = App::new(
+            config,
+            PathBuf::from("."),
+            None,
+            Size { cols: 60, rows: 12 },
+        )
+        .unwrap();
+        assert!(fresh.on_summary());
     }
 
     #[test]
@@ -2714,7 +3204,7 @@ mod tests {
     fn single_prompt_targets_active_pane() {
         let mut app = app(&["a", "b"]);
         thread::sleep(Duration::from_millis(200));
-        app.handle_event(key(KeyCode::Char('2'), KeyModifiers::ALT));
+        app.handle_event(key(KeyCode::Char('3'), KeyModifiers::ALT));
         app.handle_event(key(KeyCode::Char('\\'), KeyModifiers::CONTROL));
         app.handle_event(key(KeyCode::Char('s'), KeyModifiers::NONE));
         type_text(&mut app, "solo");
@@ -2751,6 +3241,7 @@ mod tests {
             yolo: false,
             dialog_patterns: crate::config::default_dialog_patterns(),
             input_patterns: crate::config::default_input_patterns(),
+            working_patterns: crate::config::default_working_patterns(),
             summary: test_summary(),
             harnesses: vec![cat_harness("a")],
         };

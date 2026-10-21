@@ -14,9 +14,11 @@ use alacritty_terminal::term::{Config as TermConfig, TermMode};
 use alacritty_terminal::vte::ansi::{Processor, Rgb};
 use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use ratatui::style::Style;
 
 use crate::config::Harness;
 use crate::keys::bracketed_paste;
+use crate::render::cell_style;
 
 type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 
@@ -156,6 +158,8 @@ impl EventListener for Listener {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Status {
+    /// A disabled harness that has not been started yet.
+    Stopped,
     Running,
     Exited(Option<u32>),
     Failed(String),
@@ -171,9 +175,18 @@ pub struct Pane {
     exited: Arc<AtomicBool>,
     last_output: Arc<Mutex<Option<Instant>>>,
     failure: Option<String>,
+    started: bool,
+    /// The mouse selection, kept here as well as in the terminal: the terminal
+    /// drops a selection whenever the harness erases a line it touches, which
+    /// Ink harnesses (cursor-agent) do on every redraw.
+    held: Mutex<Option<(GridPoint, GridPoint)>>,
     size: Size,
     pub introduced: bool,
 }
+
+/// A cell counted from the oldest line of scrollback, so it stays on the same
+/// text while new output scrolls the screen.
+type GridPoint = (usize, Column);
 
 impl Pane {
     pub fn spawn(
@@ -196,33 +209,46 @@ impl Pane {
                 exited: started.exited,
                 last_output: started.last_output,
                 failure: None,
+                started: true,
+                held: Mutex::new(None),
                 size,
                 introduced: false,
             },
             Err(err) => {
-                let listener = Listener {
-                    writer: None,
-                    state: state.clone(),
-                };
-                let config = TermConfig {
-                    scrolling_history: scrollback,
-                    ..TermConfig::default()
-                };
-                let term = Term::new(config, &size, listener);
-                Self {
-                    harness,
-                    term: Arc::new(Mutex::new(term)),
-                    state,
-                    writer: None,
-                    master: None,
-                    child: None,
-                    exited: Arc::new(AtomicBool::new(true)),
-                    last_output: Arc::new(Mutex::new(None)),
-                    failure: Some(format!("{err:#}")),
-                    size,
-                    introduced: false,
-                }
+                let mut pane = Self::stopped(harness, size, scrollback);
+                pane.failure = Some(format!("{err:#}"));
+                pane.started = true;
+                pane
             }
+        }
+    }
+
+    /// A tab for `harness` with no process behind it.
+    pub fn stopped(harness: Harness, size: Size, scrollback: usize) -> Self {
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        let listener = Listener {
+            writer: None,
+            state: state.clone(),
+        };
+        let config = TermConfig {
+            scrolling_history: scrollback,
+            ..TermConfig::default()
+        };
+        let term = Term::new(config, &size, listener);
+        Self {
+            harness,
+            term: Arc::new(Mutex::new(term)),
+            state,
+            writer: None,
+            master: None,
+            child: None,
+            exited: Arc::new(AtomicBool::new(true)),
+            last_output: Arc::new(Mutex::new(None)),
+            failure: None,
+            started: false,
+            held: Mutex::new(None),
+            size,
+            introduced: false,
         }
     }
 
@@ -333,6 +359,9 @@ impl Pane {
         if let Some(failure) = &self.failure {
             return Status::Failed(failure.clone());
         }
+        if !self.started {
+            return Status::Stopped;
+        }
         if !self.exited.load(Ordering::Acquire) {
             return Status::Running;
         }
@@ -342,6 +371,10 @@ impl Pane {
             .and_then(|c| c.lock().ok()?.try_wait().ok().flatten())
             .map(|status| status.exit_code());
         Status::Exited(code)
+    }
+
+    pub fn last_output(&self) -> Option<Instant> {
+        self.last_output.lock().ok().and_then(|last| *last)
     }
 
     pub fn is_busy(&self, window: Duration) -> bool {
@@ -407,29 +440,65 @@ impl Pane {
         Point::new(Line(row - offset), Column(col))
     }
 
+    fn grid_point_at(term: &Term<Listener>, col: u16, row: u16) -> GridPoint {
+        let point = Self::point_at(term, col, row);
+        let history = term.grid().history_size() as i32;
+        ((point.line.0 + history).max(0) as usize, point.column)
+    }
+
+    fn apply_selection(term: &mut Term<Listener>, (anchor, head): (GridPoint, GridPoint)) {
+        let history = term.grid().history_size() as i32;
+        let last = term.screen_lines() as i32 - 1;
+        let point = |(line, column): GridPoint| {
+            Point::new(Line((line as i32 - history).clamp(-history, last)), column)
+        };
+        let mut selection = Selection::new(SelectionType::Simple, point(anchor), Side::Left);
+        selection.update(point(head), Side::Right);
+        term.selection = Some(selection);
+    }
+
     pub fn start_selection(&self, col: u16, row: u16) {
-        if let Ok(mut term) = self.term.lock() {
-            let point = Self::point_at(&term, col, row);
-            term.selection = Some(Selection::new(SelectionType::Simple, point, Side::Left));
-        }
+        self.set_selection(col, row, true);
     }
 
     pub fn update_selection(&self, col: u16, row: u16) {
-        if let Ok(mut term) = self.term.lock() {
-            let point = Self::point_at(&term, col, row);
-            if let Some(selection) = term.selection.as_mut() {
-                selection.update(point, Side::Right);
-            }
-        }
+        self.set_selection(col, row, false);
+    }
+
+    fn set_selection(&self, col: u16, row: u16, start: bool) {
+        let (Ok(mut term), Ok(mut held)) = (self.term.lock(), self.held.lock()) else {
+            return;
+        };
+        let point = Self::grid_point_at(&term, col, row);
+        let selection = match *held {
+            Some((anchor, _)) if !start => (anchor, point),
+            _ => (point, point),
+        };
+        *held = Some(selection);
+        Self::apply_selection(&mut term, selection);
     }
 
     pub fn clear_selection(&self) {
+        if let Ok(mut held) = self.held.lock() {
+            *held = None;
+        }
         if let Ok(mut term) = self.term.lock() {
             term.selection = None;
         }
     }
 
+    /// Puts the mouse selection back into the terminal if a redraw dropped it.
+    pub fn restore_selection(&self) {
+        let (Ok(mut term), Ok(held)) = (self.term.lock(), self.held.lock()) else {
+            return;
+        };
+        if let Some(selection) = *held {
+            Self::apply_selection(&mut term, selection);
+        }
+    }
+
     pub fn selection_text(&self) -> Option<String> {
+        self.restore_selection();
         let term = self.term.lock().ok()?;
         term.selection_to_string()
             .filter(|text| !text.trim().is_empty())
@@ -442,18 +511,31 @@ impl Pane {
             .unwrap_or(0)
     }
 
+    #[cfg(test)]
     pub fn text_since(&self, mark: usize, max_lines: usize) -> String {
+        self.styled_since(mark, max_lines)
+            .into_iter()
+            .map(|(text, _)| text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The lines since `mark`, each with the style of every char in it, with
+    /// runs of blank lines collapsed and at most `max_lines` kept.
+    pub fn styled_since(&self, mark: usize, max_lines: usize) -> Vec<(String, Vec<Style>)> {
         let Ok(term) = self.term.lock() else {
-            return String::new();
+            return Vec::new();
         };
+        let colors = term.colors();
         let grid = term.grid();
         let history = grid.history_size();
         let back = history.saturating_sub(mark).min(history) as i32;
         let columns = grid.columns();
-        let mut lines: Vec<String> = Vec::new();
+        let mut lines: Vec<(String, Vec<Style>)> = Vec::new();
         for line in -back..grid.screen_lines() as i32 {
             let row = &grid[Line(line)];
             let mut text = String::new();
+            let mut styles = Vec::new();
             for col in 0..columns {
                 let cell = &row[Column(col)];
                 if cell
@@ -462,28 +544,33 @@ impl Pane {
                 {
                     continue;
                 }
+                let style = cell_style(cell.fg, cell.bg, cell.flags, colors);
                 text.push(cell.c);
+                styles.push(style);
                 if let Some(extra) = cell.zerowidth() {
                     text.extend(extra);
+                    styles.extend(extra.iter().map(|_| style));
                 }
             }
-            lines.push(text.trim_end().to_string());
+            let trimmed = text.trim_end().to_string();
+            styles.truncate(trimmed.chars().count());
+            lines.push((trimmed, styles));
         }
-        let mut compact: Vec<String> = Vec::new();
+        let mut compact: Vec<(String, Vec<Style>)> = Vec::new();
         for line in lines {
-            if line.is_empty() && compact.last().is_some_and(|l: &String| l.is_empty()) {
+            if line.0.is_empty() && compact.last().is_some_and(|l| l.0.is_empty()) {
                 continue;
             }
             compact.push(line);
         }
-        while compact.last().is_some_and(String::is_empty) {
+        while compact.last().is_some_and(|l| l.0.is_empty()) {
             compact.pop();
         }
-        while compact.first().is_some_and(String::is_empty) {
+        while compact.first().is_some_and(|l| l.0.is_empty()) {
             compact.remove(0);
         }
         let skip = compact.len().saturating_sub(max_lines);
-        compact[skip..].join("\n")
+        compact.split_off(skip)
     }
 
     pub fn ready_for_prompt(&self) -> bool {

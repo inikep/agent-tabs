@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -7,6 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use ratatui::style::Style;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -64,7 +66,13 @@ pub struct Capture {
     pub text: String,
     pub finished: bool,
     pub model: Option<String>,
+    pub at: Instant,
+    /// The harness's own style of each char, by line text.
+    pub styles: HashMap<String, Vec<Style>>,
 }
+
+/// A line of chars, each with the style the harness drew it in.
+pub type Cells = Vec<(char, Style)>;
 
 #[derive(Debug)]
 pub struct Round {
@@ -77,6 +85,12 @@ pub struct Round {
     pub started: Instant,
     pub started_at: u64,
     pub compared_unfinished: bool,
+    /// The harness got another prompt after this round's, so later output
+    /// belongs to that prompt.
+    pub followed_up: Vec<bool>,
+    /// The answer of a finished harness that started working again, kept to
+    /// tell whether its new answer differs.
+    pub reopened: Vec<Option<String>>,
 }
 
 pub fn read_state(state: &Arc<Mutex<SummaryState>>) -> SummaryState {
@@ -99,6 +113,8 @@ impl Round {
             started: Instant::now(),
             started_at,
             compared_unfinished: false,
+            followed_up: vec![false; n],
+            reopened: vec![None; n],
         }
     }
 
@@ -109,6 +125,13 @@ impl Round {
     pub fn answer(&self, slot: usize) -> Option<String> {
         let capture = self.captures[slot].as_ref()?;
         Some(final_message(&extract_answer(&capture.text, &self.prompt)))
+    }
+
+    /// The answer reflowed for display, in the harness's own colors.
+    pub fn answer_lines(&self, slot: usize) -> Option<Vec<Cells>> {
+        let answer = self.answer(slot)?;
+        let styles = &self.captures[slot].as_ref()?.styles;
+        Some(reflow_styled(&answer, styles))
     }
 
     pub fn set_state(&self, state: SummaryState) {
@@ -142,8 +165,32 @@ impl Round {
     }
 }
 
+/// A row or border of a table drawn with box characters, as in
+/// `┌──┬──┐`, `│a │b │` or `└──┴──┘`.
+fn is_table_line(line: &str) -> bool {
+    let text = line.trim();
+    let (Some(first), Some(last)) = (text.chars().next(), text.chars().last()) else {
+        return false;
+    };
+    text.chars().count() >= 3
+        && matches!(
+            (first, last),
+            ('│', '│')
+                | ('┌', '┐')
+                | ('├', '┤')
+                | ('└', '┘')
+                | ('┃', '┃')
+                | ('╭', '╮')
+                | ('╰', '╯')
+        )
+        && !(first == '│' && text.chars().filter(|c| *c == '│').count() < 2)
+}
+
 fn is_separator(line: &str) -> bool {
     let text = line.trim();
+    if is_table_line(line) {
+        return false;
+    }
     let total = text.chars().count();
     let boxed = text
         .chars()
@@ -211,7 +258,9 @@ fn is_step_line(line: &str) -> bool {
 
 fn is_tool_line(line: &str) -> bool {
     let text = line.trim_start();
-    is_step_line(line) || text.starts_with(['⎿', '└', '├', '│']) || text.starts_with("$ ")
+    is_step_line(line)
+        || (text.starts_with(['⎿', '└', '├', '│']) && !is_table_line(line))
+        || text.starts_with("$ ")
 }
 
 fn is_thinking_line(line: &str) -> bool {
@@ -283,6 +332,12 @@ pub fn final_message(answer: &str) -> String {
     let mut start = None;
     let mut end = lines.len();
     let mut tool_indent: Option<usize> = None;
+    // The indent of the harness's message markers (codex's `•` at column 0).
+    // A deeper marker is a list item inside the message, not a new message.
+    let mut marker_indent: Option<usize> = None;
+    // The indent of the current message's plain text. A marker that is not
+    // left of it is a list item too (agy indents both by two).
+    let mut text_indent: Option<usize> = None;
     let mut thinking = false;
     for (i, line) in lines.iter().enumerate() {
         if line.trim().is_empty() || is_right_aligned_notice(line) {
@@ -291,6 +346,7 @@ pub fn final_message(answer: &str) -> String {
         if is_input_line(line) && !is_thinking_line(line) {
             start = None;
             tool_indent = None;
+            marker_indent = None;
             thinking = false;
             continue;
         }
@@ -311,6 +367,9 @@ pub fn final_message(answer: &str) -> String {
             continue;
         }
         if is_tool_line(line) {
+            if is_message_start(line) {
+                marker_indent = Some(marker_indent.map_or(indent(line), |m| m.min(indent(line))));
+            }
             tool_indent = Some(tool_indent.map_or(indent(line), |t| t.min(indent(line))));
             continue;
         }
@@ -318,8 +377,19 @@ pub fn final_message(answer: &str) -> String {
             continue;
         }
         let after_tool = tool_indent.take().is_some();
-        if after_thinking || is_message_start(line) || after_tool || start.is_none() {
+        let marker = is_message_start(line);
+        let new_message = marker
+            && marker_indent.is_none_or(|m| indent(line) <= m)
+            && text_indent.is_none_or(|t| indent(line) < t);
+        if new_message {
+            marker_indent = Some(indent(line));
+        }
+        if after_thinking || new_message || after_tool || start.is_none() {
             start = Some(i);
+            text_indent = None;
+        }
+        if !marker {
+            text_indent = Some(text_indent.map_or(indent(line), |t| t.min(indent(line))));
         }
     }
     let Some(start) = start else {
@@ -336,32 +406,61 @@ pub fn final_message(answer: &str) -> String {
     message.join("\n")
 }
 
+#[cfg(test)]
 pub fn reflow(text: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
+    reflow_styled(text, &HashMap::new())
+        .into_iter()
+        .map(|line| line.into_iter().map(|(c, _)| c).collect())
+        .collect()
+}
+
+/// Joins lines the harness wrapped back into paragraphs, keeping the style of
+/// each char from `styles` (looked up by the line's text).
+pub fn reflow_styled(text: &str, styles: &HashMap<String, Vec<Style>>) -> Vec<Cells> {
+    let mut out: Vec<Cells> = Vec::new();
     let mut base_indent = 0;
+    let mut after_table = false;
     for line in text.lines() {
         if line.trim().is_empty() {
             if out.last().is_some_and(|l| !l.is_empty()) {
-                out.push(String::new());
+                out.push(Vec::new());
             }
             continue;
         }
+        let table = is_table_line(line);
         let continues = out.last().is_some_and(|l| !l.is_empty())
             && !starts_item(line)
+            && !table
+            && !after_table
             && indent(line) <= base_indent + 2;
+        after_table = table;
+        let cells = trimmed_cells(line, styles);
         if continues {
             let last = out.last_mut().expect("checked non-empty");
-            last.push(' ');
-            last.push_str(line.trim());
+            last.push((' ', Style::default()));
+            last.extend(cells);
         } else {
             base_indent = indent(line);
-            out.push(line.trim().to_string());
+            out.push(cells);
         }
     }
-    while out.last().is_some_and(String::is_empty) {
+    while out.last().is_some_and(Vec::is_empty) {
         out.pop();
     }
     out
+}
+
+fn trimmed_cells(line: &str, styles: &HashMap<String, Vec<Style>>) -> Cells {
+    let style = styles.get(line.trim_end());
+    let lead = line.chars().take_while(|c| c.is_whitespace()).count();
+    line.trim()
+        .chars()
+        .enumerate()
+        .map(|(i, c)| {
+            let style = style.and_then(|s| s.get(lead + i)).copied();
+            (c, style.unwrap_or_default())
+        })
+        .collect()
 }
 
 pub fn headline(answer: &str) -> Option<String> {
@@ -565,6 +664,8 @@ mod tests {
             text: text.into(),
             finished,
             model: None,
+            at: Instant::now(),
+            styles: HashMap::new(),
         }
     }
 
@@ -663,6 +764,75 @@ mod tests {
             "Then issue 2 does not apply and should be dropped.\nThe new code already handles missing markers."
         );
         assert_eq!(final_message("• Ran ls\n  └ a\n• All good."), "• All good.");
+    }
+
+    #[test]
+    fn final_message_keeps_nested_bullets_inside_codex_message() {
+        let answer = "• Yes—the reported issues are fixed in 26b523245570.\n\n  • The startup guard prevents pruning.\n  • The reproducer now passes.\n  • All nine targeted tests passed.\n\n  No new correctness issues found in the update.\n\n  Worked for 3m 1s";
+        assert_eq!(
+            final_message(answer),
+            "• Yes—the reported issues are fixed in 26b523245570.\n\n  • The startup guard prevents pruning.\n  • The reproducer now passes.\n  • All nine targeted tests passed.\n\n  No new correctness issues found in the update."
+        );
+        let after_tool = "• Ran ls\n  └ a\n• Done:\n\n  • first\n  • second";
+        assert_eq!(
+            final_message(after_tool),
+            "• Done:\n\n  • first\n  • second"
+        );
+    }
+
+    #[test]
+    fn final_message_keeps_agy_bullets_level_with_its_text() {
+        let screen = "> what is your $MODEL_ID in Chinese ?\n▸ Thought for 8s, 210 tokens\n  I'm currently processing the request...\n  In Chinese, Gemini 4 Argon translates to:\n\n  • Literal translation: 双子座-4-氩-高\n  • Common tech usage: Gemini 4 氩 (高)\n\n  ### Breakdown:\n\n  • Gemini: 双子座\n  • High: 高";
+        let answer = final_message(&extract_answer(
+            screen,
+            "what is your $MODEL_ID in Chinese ?",
+        ));
+        assert!(
+            answer.starts_with("  In Chinese, Gemini 4 Argon translates to:"),
+            "{answer}"
+        );
+        assert!(answer.ends_with("  • High: 高"), "{answer}");
+        // Codex messages at column 0 with text indented under them still split.
+        assert_eq!(
+            final_message("• First message\n  wrapped on.\n• Second message"),
+            "• Second message"
+        );
+    }
+
+    #[test]
+    fn final_message_keeps_a_cursor_review_with_bullets_and_code() {
+        let answer = "  Verdict: ✅ Correct — no source changes needed\n\n  Correctness review\n\n  • Alphabet fixed: old alphabet had 60 chars, missing U/V; new one has all 62 unique\n    alphanumerics.\n\n   /work/x/audit_keyring.cc lines 59-67\n\n  bool get_random_string(std::string &str) {\n    static constexpr size_t rand_string_size = 126;\n  }\n\n  Validation (in the designated build dir)\n\n  • ninja component_audit_log_filter — builds/links cleanly.\n  • git diff --check clean; both changed .cc files are exact clang-format-15 matches;\n    /work/x left untouched (git status clean, HEAD unchanged).\n\n  One non-blocking observation\n\n  The added test asserts only the format.";
+        assert_eq!(final_message(answer), answer);
+    }
+
+    #[test]
+    fn final_message_keeps_a_table() {
+        let answer = "     mtr results (component_audit_log_filter suite)\n\n     ┌──────────┬───────────────┐\n     │Result    │Tests          │\n     ├──────────┼───────────────┤\n     │PASS      │udf_get,       │\n     │          │log_format     │\n     └──────────┴───────────────┘\n\n     The failures were proven pre-existing.\n\n     Implemented by GLM-5.3 high";
+        assert_eq!(final_message(answer), answer);
+        let screen = format!("› run it\n{answer}\n────────────────\n› Ask me");
+        let extracted = extract_answer(&screen, "run it");
+        assert!(
+            extracted.contains("│PASS      │udf_get,       │"),
+            "{extracted}"
+        );
+        assert!(
+            extracted.ends_with("Implemented by GLM-5.3 high"),
+            "{extracted}"
+        );
+        let lines = reflow(answer);
+        assert!(
+            lines.contains(&"│Result    │Tests          │".to_string()),
+            "{lines:#?}"
+        );
+        assert!(
+            lines.contains(&"│          │log_format     │".to_string()),
+            "{lines:#?}"
+        );
+        assert!(
+            lines.contains(&"The failures were proven pre-existing.".to_string()),
+            "{lines:#?}"
+        );
+        assert!(is_tool_line("  └ out.txt") && is_tool_line("  │ x"));
     }
 
     #[test]

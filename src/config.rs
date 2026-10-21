@@ -26,6 +26,10 @@ pub struct Harness {
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub yolo_args: Option<Vec<String>>,
+    /// A disabled harness is not started with agent-tabs and is left out of
+    /// prompts to all harnesses until it is started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
 }
 
 pub fn default_yolo_args(command: &str) -> &'static [&'static str] {
@@ -135,6 +139,10 @@ impl Harness {
         })
     }
 
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+
     pub fn strips_right_panel(&self) -> bool {
         self.strip_right_panel
             .unwrap_or_else(|| program_name(&self.command) == "opencode")
@@ -209,6 +217,8 @@ pub struct Config {
     pub dialog_patterns: Vec<String>,
     #[serde(default = "default_input_patterns")]
     pub input_patterns: Vec<String>,
+    #[serde(default = "default_working_patterns")]
+    pub working_patterns: Vec<String>,
     #[serde(default)]
     pub summary: SummaryConfig,
     #[serde(rename = "harness", default = "default_harnesses")]
@@ -229,6 +239,18 @@ fn default_mouse() -> bool {
 
 fn default_osc52() -> bool {
     true
+}
+
+pub fn default_working_patterns() -> Vec<String> {
+    [
+        r"(?i)\bstill running\b",
+        r"(?i)\besc to interrupt\b",
+        // agy's step for a command it is still running (`● Ran` once done).
+        r"(?m)^\s*○ Running\b",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 pub fn default_input_patterns() -> Vec<String> {
@@ -298,6 +320,7 @@ impl Default for Config {
             yolo: false,
             dialog_patterns: default_dialog_patterns(),
             input_patterns: default_input_patterns(),
+            working_patterns: default_working_patterns(),
             summary: SummaryConfig::default(),
             harnesses: default_harnesses(),
         }
@@ -332,6 +355,7 @@ impl Config {
         anyhow::ensure!(!self.harnesses.is_empty(), "config defines no harnesses");
         self.dialog_regex()?;
         self.input_regex()?;
+        self.working_regex()?;
         let mut seen = std::collections::HashSet::new();
         for h in &self.harnesses {
             anyhow::ensure!(!h.name.trim().is_empty(), "harness with empty name");
@@ -366,11 +390,19 @@ impl Config {
             );
         }
         self.harnesses.retain(|h| only.contains(&h.name));
+        // Naming a harness in --only asks for it, even when it is disabled.
+        for harness in &mut self.harnesses {
+            harness.enabled = None;
+        }
         Ok(())
     }
 
     pub fn dialog_regex(&self) -> Result<regex::RegexSet> {
         regex::RegexSet::new(&self.dialog_patterns).context("invalid dialog_patterns")
+    }
+
+    pub fn working_regex(&self) -> Result<regex::RegexSet> {
+        regex::RegexSet::new(&self.working_patterns).context("invalid working_patterns")
     }
 
     pub fn input_regex(&self) -> Result<regex::RegexSet> {
@@ -433,6 +465,15 @@ mod tests {
         config.select(&["codex".into(), "agy".into()]).unwrap();
         assert_eq!(config.harnesses.len(), 2);
         assert!(Config::default().select(&["nope".into()]).is_err());
+    }
+
+    #[test]
+    fn select_starts_disabled_harnesses_it_names() {
+        let mut config = Config::default();
+        config.harnesses[1].enabled = Some(false);
+        let name = config.harnesses[1].name.clone();
+        config.select(&[name]).unwrap();
+        assert!(config.harnesses[0].is_enabled());
     }
 
     #[test]
@@ -638,6 +679,19 @@ mod tests {
         let mut config = Config::default();
         config.harnesses[0].model_patterns = Some(vec!["(".into()]);
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn default_working_patterns_match_background_work() {
+        let set = Config::default().working_regex().unwrap();
+        for text in [
+            "✻ Sautéed for 2m 12s · done 1:35 PM · 1 shell, 1 monitor still running",
+            "• Working (5s • esc to interrupt)",
+            "● Explored 4 files\n○ Running (ninja -C build) (ctrl+o to expand)\n\n  waiting",
+        ] {
+            assert!(set.is_match(text), "{text}");
+        }
+        assert!(!set.is_match("✻ Churned for 3s · done 6:38 PM"));
     }
 
     #[test]

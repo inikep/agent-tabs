@@ -7,7 +7,7 @@ mod pane;
 mod render;
 mod summary;
 
-use std::io::stdout;
+use std::io::{Write, stdout};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -95,32 +95,63 @@ fn main() -> Result<()> {
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         );
     }
-
     let mouse = config.mouse;
-    let result = (|| {
-        let area = terminal.size()?;
-        let mut app = App::new(
-            config,
-            cwd,
-            cli.log_dir,
-            Size {
-                cols: area.width,
-                rows: area.height,
-            },
-        )?;
-        let result = app.run(&mut terminal);
-        app.shutdown();
-        result
-    })();
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore_terminal(keyboard_enhanced, mouse);
+        previous_hook(info);
+    }));
 
+    let area = match terminal.size() {
+        Ok(area) => area,
+        Err(err) => {
+            restore_terminal(keyboard_enhanced, mouse);
+            return Err(err.into());
+        }
+    };
+    let mut app = match App::new(
+        config,
+        cwd,
+        cli.log_dir,
+        Size {
+            cols: area.width,
+            rows: area.height,
+        },
+    ) {
+        Ok(app) => app,
+        Err(err) => {
+            restore_terminal(keyboard_enhanced, mouse);
+            return Err(err);
+        }
+    };
+    let result = app.run(&mut terminal);
+    restore_terminal(keyboard_enhanced, mouse);
+    app.shutdown();
+    result
+}
+
+fn restore_terminal(keyboard_enhanced: bool, mouse: bool) {
     let mut out = stdout();
-    if keyboard_enhanced {
-        let _ = execute!(out, PopKeyboardEnhancementFlags);
-    }
     if mouse {
         let _ = execute!(out, DisableMouseCapture);
     }
     let _ = execute!(out, DisableBracketedPaste);
+    if keyboard_enhanced {
+        let _ = execute!(out, PopKeyboardEnhancementFlags);
+    }
+    let _ = out.flush();
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    discard_pending_input();
     ratatui::restore();
-    result
+}
+
+fn discard_pending_input() {
+    while ratatui::crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false) {
+        if ratatui::crossterm::event::read().is_err() {
+            break;
+        }
+    }
+    unsafe {
+        libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH);
+    }
 }
