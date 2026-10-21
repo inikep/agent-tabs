@@ -172,6 +172,7 @@ pub struct Pane {
     last_output: Arc<Mutex<Option<Instant>>>,
     failure: Option<String>,
     size: Size,
+    pub introduced: bool,
 }
 
 impl Pane {
@@ -196,6 +197,7 @@ impl Pane {
                 last_output: started.last_output,
                 failure: None,
                 size,
+                introduced: false,
             },
             Err(err) => {
                 let listener = Listener {
@@ -218,6 +220,7 @@ impl Pane {
                     last_output: Arc::new(Mutex::new(None)),
                     failure: Some(format!("{err:#}")),
                     size,
+                    introduced: false,
                 }
             }
         }

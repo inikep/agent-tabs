@@ -392,6 +392,11 @@ impl App {
                 .ok()
                 .map(|f| Box::new(f) as Box<dyn Write + Send>)
         });
+        let harness = if self.config.yolo {
+            harness.with_yolo()
+        } else {
+            harness
+        };
         Pane::spawn(
             harness,
             &self.cwd,
@@ -436,8 +441,7 @@ impl App {
         for (i, text) in std::mem::take(&mut self.pending) {
             match self.readiness(i) {
                 Readiness::Ready => {
-                    self.mark_delivered(i);
-                    self.panes[i].send_prompt(&text, delay);
+                    self.send_to(i, &text, delay);
                     delivered.push(self.panes[i].name().to_string());
                 }
                 Readiness::NotRunning => dropped.push(self.panes[i].name().to_string()),
@@ -471,7 +475,7 @@ impl App {
 
     fn needs_input(&self, index: usize) -> bool {
         matches!(self.panes[index].status(), Status::Running)
-            && self.inputs.is_match(&self.panes[index].screen_tail(20))
+            && self.inputs.is_match(&self.panes[index].screen_tail(25))
     }
 
     fn has_pending(&self, index: usize) -> bool {
@@ -693,6 +697,32 @@ impl App {
         }
     }
 
+    fn model_name(&self, pane: usize) -> Option<String> {
+        let harness = &self.panes[pane].harness;
+        if let Some(model) = &harness.model {
+            return Some(model.clone());
+        }
+        crate::config::detect_model(
+            self.model_patterns.get(pane)?,
+            &self.panes[pane].screen_text(),
+        )
+        .map(|(model, _)| model)
+    }
+
+    fn send_to(&mut self, pane: usize, text: &str, delay: Duration) {
+        let mut text = text.to_string();
+        if self.config.model_id_prefix
+            && !self.panes[pane].introduced
+            && let Some(model) = self.model_name(pane)
+        {
+            let model_id = model.split_whitespace().collect::<Vec<_>>().join("-");
+            text = format!("MODEL_ID={model_id}\n\n{text}");
+            self.panes[pane].introduced = true;
+        }
+        self.mark_delivered(pane);
+        self.panes[pane].send_prompt(&text, delay);
+    }
+
     fn submit_prompt(&mut self, text: &str, targets: &[usize]) {
         let delay = Duration::from_millis(self.config.submit_delay_ms);
         let mut sent = Vec::new();
@@ -702,8 +732,7 @@ impl App {
         }
         for &i in targets {
             if self.readiness(i) == Readiness::Ready {
-                self.mark_delivered(i);
-                self.panes[i].send_prompt(text, delay);
+                self.send_to(i, text, delay);
                 sent.push(self.panes[i].name().to_string());
             } else {
                 self.pending.push((i, text.to_string()));
@@ -910,6 +939,22 @@ impl App {
         let exit = " ✕ exit ";
         let exit_width = exit.width() as u16;
         let exit_x = tabs_area.right().saturating_sub(exit_width);
+        if self.config.yolo {
+            let badge = " YOLO ";
+            let badge_width = badge.width() as u16;
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    badge,
+                    Style::default().white().on_red().bold(),
+                )),
+                Rect::new(
+                    exit_x.saturating_sub(badge_width + 1),
+                    tabs_area.y,
+                    badge_width,
+                    1,
+                ),
+            );
+        }
         self.exit_span = (exit_x, tabs_area.right());
         let exit_style = if self.mode == Mode::ConfirmQuit {
             Style::default().white().on_red().bold()
@@ -1945,6 +1990,8 @@ mod tests {
             mouse: true,
             osc52: false,
             system_clipboard: false,
+            model_id_prefix: true,
+            yolo: false,
             dialog_patterns: crate::config::default_dialog_patterns(),
             input_patterns: crate::config::default_input_patterns(),
             summary: test_summary(),
@@ -2286,6 +2333,43 @@ mod tests {
     }
 
     #[test]
+    fn yolo_starts_harnesses_with_their_flag_and_shows_a_badge() {
+        let mut config = Config {
+            submit_delay_ms: 30,
+            scrollback: 100,
+            mouse: true,
+            osc52: false,
+            system_clipboard: false,
+            model_id_prefix: true,
+            yolo: true,
+            dialog_patterns: crate::config::default_dialog_patterns(),
+            input_patterns: crate::config::default_input_patterns(),
+            summary: test_summary(),
+            harnesses: vec![script_harness("p", "printf 'args:%s' \"$*\"; sleep 5")],
+        };
+        config.harnesses[0].yolo_args = Some(vec!["--approve".into()]);
+        config.harnesses[0].args.push("--".into());
+        let mut app = App::new(
+            config,
+            PathBuf::from("."),
+            None,
+            Size { cols: 60, rows: 12 },
+        )
+        .unwrap();
+        wait_for(app.pane(0), "args:");
+        assert!(
+            screen(app.pane(0)).contains("--approve"),
+            "{}",
+            screen(app.pane(0))
+        );
+        let rows = buffer_rows(&draw_app(&mut app, 80, 10));
+        assert!(
+            rows[0].contains("YOLO") && rows[0].contains("✕ exit"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
     fn exit_button_asks_first_then_quits() {
         let mut app = app(&["a"]);
         let rows = buffer_rows(&draw_app(&mut app, 80, 10));
@@ -2404,6 +2488,31 @@ mod tests {
     }
 
     #[test]
+    fn first_prompt_to_each_harness_starts_with_model_id() {
+        let mut known = cat_harness("known");
+        known.model = Some("Test Model high".into());
+        let mut app = app_with(vec![known, cat_harness("unknown")]);
+        thread::sleep(Duration::from_millis(200));
+        compose_all(&mut app, "first");
+        wait_for(app.pane(0), "got:first");
+        wait_for(app.pane(1), "got:first");
+        assert!(
+            screen(app.pane(0)).contains("got:MODEL_ID=Test-Model-high"),
+            "{}",
+            screen(app.pane(0))
+        );
+        assert!(
+            !screen(app.pane(1)).contains("MODEL_ID"),
+            "{}",
+            screen(app.pane(1))
+        );
+        compose_all(&mut app, "second");
+        wait_for(app.pane(0), "got:second");
+        assert_eq!(screen(app.pane(0)).matches("MODEL_ID").count(), 1);
+        assert_eq!(app.rounds.last().unwrap().prompt, "second");
+    }
+
+    #[test]
     fn single_target_prompt_does_not_start_a_round() {
         let mut app = app(&["a", "b"]);
         thread::sleep(Duration::from_millis(200));
@@ -2508,6 +2617,8 @@ mod tests {
             mouse: true,
             osc52: false,
             system_clipboard: false,
+            model_id_prefix: true,
+            yolo: false,
             dialog_patterns: crate::config::default_dialog_patterns(),
             input_patterns: crate::config::default_input_patterns(),
             summary: test_summary(),
@@ -2636,6 +2747,8 @@ mod tests {
             mouse: true,
             osc52: false,
             system_clipboard: false,
+            model_id_prefix: true,
+            yolo: false,
             dialog_patterns: crate::config::default_dialog_patterns(),
             input_patterns: crate::config::default_input_patterns(),
             summary: test_summary(),

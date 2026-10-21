@@ -24,6 +24,30 @@ pub struct Harness {
     pub strip_right_panel: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub yolo_args: Option<Vec<String>>,
+}
+
+pub fn default_yolo_args(command: &str) -> &'static [&'static str] {
+    match program_name(command) {
+        "claude" => &["--dangerously-skip-permissions"],
+        "codex" => &["--dangerously-bypass-approvals-and-sandbox"],
+        "agy" => &["--dangerously-skip-permissions"],
+        "cursor-agent" => &["--yolo"],
+        "opencode" => &["--auto"],
+        _ => &[],
+    }
+}
+
+fn yolo_conflicts(command: &str) -> (&'static [&'static str], &'static [&'static str]) {
+    match program_name(command) {
+        "claude" => (&["--permission-mode"], &[]),
+        "codex" => (
+            &["--sandbox", "-s", "--ask-for-approval", "-a"],
+            &["--full-auto"],
+        ),
+        _ => (&[], &[]),
+    }
 }
 
 fn program_name(command: &str) -> &str {
@@ -58,6 +82,43 @@ pub fn default_model_patterns(command: &str) -> Vec<String> {
 }
 
 impl Harness {
+    pub fn with_yolo(&self) -> Harness {
+        let extra: Vec<String> = match &self.yolo_args {
+            Some(args) => args.clone(),
+            None => default_yolo_args(&self.command)
+                .iter()
+                .map(|a| a.to_string())
+                .collect(),
+        };
+        let (with_value, plain) = yolo_conflicts(&self.command);
+        let mut args = Vec::new();
+        let mut skip_value = false;
+        for arg in &self.args {
+            if skip_value {
+                skip_value = false;
+                continue;
+            }
+            let flag = arg.split('=').next().unwrap_or(arg);
+            if with_value.contains(&flag) {
+                skip_value = !arg.contains('=');
+                continue;
+            }
+            if plain.contains(&arg.as_str()) {
+                continue;
+            }
+            args.push(arg.clone());
+        }
+        for arg in extra {
+            if !args.contains(&arg) {
+                args.push(arg);
+            }
+        }
+        Harness {
+            args,
+            ..self.clone()
+        }
+    }
+
     pub fn model_label(&self, detected: Option<(String, Option<String>)>) -> Option<String> {
         let (model, detected_provider) = match &self.model {
             Some(model) => (model.clone(), None),
@@ -140,6 +201,10 @@ pub struct Config {
     pub osc52: bool,
     #[serde(default = "default_osc52")]
     pub system_clipboard: bool,
+    #[serde(default = "default_osc52")]
+    pub model_id_prefix: bool,
+    #[serde(default)]
+    pub yolo: bool,
     #[serde(default = "default_dialog_patterns")]
     pub dialog_patterns: Vec<String>,
     #[serde(default = "default_input_patterns")]
@@ -176,6 +241,8 @@ pub fn default_input_patterns() -> Vec<String> {
         r"(?i)would you like to (run|make|apply|allow)",
         r"(?i)allow (this )?(command|tool|edit)\?",
         r"(?i)\(y/n\)",
+        r"(?i)△?\s*permission required",
+        r"(?i)allow once\s+allow always\s+reject",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -227,6 +294,8 @@ impl Default for Config {
             mouse: default_mouse(),
             osc52: default_osc52(),
             system_clipboard: default_osc52(),
+            model_id_prefix: default_osc52(),
+            yolo: false,
             dialog_patterns: default_dialog_patterns(),
             input_patterns: default_input_patterns(),
             summary: SummaryConfig::default(),
@@ -388,6 +457,8 @@ mod tests {
             "Requesting permission for:\n   mkdir -p x\nRun this command?\n> 1. Yes, run command",
             "Would you like to run the following command?",
             "Overwrite file? (y/n)",
+            "  ┃  △ Permission required\n  ┃    ← Access external directory /work/x",
+            "  ┃   Allow once   Allow always   Reject                     ctrl+f fullscreen",
         ] {
             assert!(set.is_match(text), "{text}");
         }
@@ -508,6 +579,58 @@ mod tests {
         );
         assert_eq!(model_of("codex", "no status here"), None);
         assert_eq!(model_of("unknown-cli", "Opus 5.5 high |"), None);
+    }
+
+    #[test]
+    fn yolo_adds_each_harness_flag_and_drops_conflicts() {
+        let mut claude = harness("opus", "claude");
+        claude.args = vec![
+            "--permission-mode".into(),
+            "auto".into(),
+            "--model".into(),
+            "opus".into(),
+        ];
+        assert_eq!(
+            claude.with_yolo().args,
+            ["--model", "opus", "--dangerously-skip-permissions"]
+        );
+        let mut codex = harness("gpt", "codex");
+        codex.args = vec![
+            "--full-auto".into(),
+            "--sandbox=workspace-write".into(),
+            "-c".into(),
+            "x=1".into(),
+        ];
+        assert_eq!(
+            codex.with_yolo().args,
+            ["-c", "x=1", "--dangerously-bypass-approvals-and-sandbox"]
+        );
+        assert_eq!(
+            harness("g", "agy").with_yolo().args,
+            ["--dangerously-skip-permissions"]
+        );
+        let mut cursor = harness("c", "cursor-agent");
+        cursor.args = vec!["--model".into(), "grok-4.7-high".into()];
+        assert_eq!(
+            cursor.with_yolo().args,
+            ["--model", "grok-4.7-high", "--yolo"]
+        );
+        assert_eq!(
+            harness("o", "/usr/bin/opencode").with_yolo().args,
+            ["--auto"]
+        );
+        assert_eq!(harness("x", "other").with_yolo().args, Vec::<String>::new());
+        let twice = claude.with_yolo().with_yolo();
+        assert_eq!(
+            twice.args,
+            ["--model", "opus", "--dangerously-skip-permissions"]
+        );
+        let mut custom = harness("c", "claude");
+        custom.yolo_args = Some(vec!["--permission-mode".into(), "bypassPermissions".into()]);
+        assert_eq!(
+            custom.with_yolo().args,
+            ["--permission-mode", "bypassPermissions"]
+        );
     }
 
     #[test]

@@ -56,12 +56,21 @@ struct Cli {
 
     #[arg(long, help = "Print the effective configuration as TOML and exit")]
     print_config: bool,
+
+    #[arg(
+        long,
+        help = "Start every harness in its approve-everything mode (claude/agy --dangerously-skip-permissions, codex --dangerously-bypass-approvals-and-sandbox, cursor-agent --yolo, opencode --auto)"
+    )]
+    yolo: bool,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let mut config = Config::load(cli.config.as_deref())?;
     config.select(&cli.only)?;
+    if cli.yolo {
+        config.yolo = true;
+    }
     if cli.print_config {
         print!("{}", config.to_toml());
         return Ok(());

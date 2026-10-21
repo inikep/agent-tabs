@@ -34,6 +34,24 @@ agent-tabs --log-dir ~/agent-tabs-logs
 
 All harnesses start in the current directory, or in `--cwd DIR`.
 
+### `--yolo`
+
+`agent-tabs --yolo` (or `yolo = true` in the config) starts every harness in its
+own "approve everything" mode, and shows a red `YOLO` badge in the tab bar:
+
+| Harness | Added flag | Removed from its args |
+|---|---|---|
+| claude | `--dangerously-skip-permissions` | `--permission-mode …` |
+| codex | `--dangerously-bypass-approvals-and-sandbox` | `--full-auto`, `--sandbox …`, `--ask-for-approval …` |
+| agy | `--dangerously-skip-permissions` | |
+| cursor-agent | `--yolo` | |
+| opencode | `--auto` | |
+
+Harnesses then run commands and edit files without asking, and codex also
+drops its sandbox, so use it only in a disposable checkout or VM. Set
+`yolo_args = [...]` on a harness to use different flags, or `yolo_args = []`
+to keep that harness asking.
+
 ## Keys
 
 Everything you type goes to the harness in the active tab. agent-tabs only
@@ -67,6 +85,21 @@ In the prompt composer:
 A composed prompt is sent to each target as a bracketed paste, so a multi-line
 prompt arrives as one message. After `submit_delay_ms` agent-tabs presses
 `Enter` for you.
+
+The first prompt agent-tabs sends to each harness starts with a line naming
+its model, so the model doesn't have to guess what it is:
+
+```text
+MODEL_ID=Gemini-4-Argon-high
+
+<your prompt>
+```
+
+The name is the one the summary tab shows, without the provider and with
+spaces replaced by `-`. It's added
+once per harness session (a restarted tab gets it again), and left off until
+the model is known. Text you type directly into a tab is never changed. Set
+`model_id_prefix = false` to turn it off.
 
 A prompt is only sent to a harness that is at its input box. Until then it
 waits in a queue, and the tab shows `⧗`:
@@ -192,6 +225,7 @@ Optional: `~/.config/agent-tabs/config.toml`, or pass `--config FILE`.
 submit_delay_ms = 150
 scrollback = 20000
 mouse = true
+model_id_prefix = true
 dialog_patterns = [
   "(?i)quick safety check",
   "(?i)trust this folder\\?",
