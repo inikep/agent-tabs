@@ -792,6 +792,12 @@ impl App {
         }
     }
 
+    /// The model name sent as MODEL_ID, e.g. `Gemini-4-Argon-high`.
+    fn model_id(&self, pane: usize) -> Option<String> {
+        let model = self.model_name(pane)?;
+        Some(model.split_whitespace().collect::<Vec<_>>().join("-"))
+    }
+
     fn model_name(&self, pane: usize) -> Option<String> {
         let harness = &self.panes[pane].harness;
         if let Some(model) = &harness.model {
@@ -808,10 +814,9 @@ impl App {
         let mut text = text.to_string();
         if self.config.model_id_prefix
             && !self.panes[pane].introduced
-            && let Some(model) = self.model_name(pane)
+            && let Some(model_id) = self.model_id(pane)
         {
-            let model_id = model.split_whitespace().collect::<Vec<_>>().join("-");
-            text = format!("MODEL_ID={model_id}\n\n{text}");
+            text = format!("MODEL_ID={model_id}\n{text}");
             self.panes[pane].introduced = true;
         }
         self.mark_delivered(pane);
@@ -1375,6 +1380,7 @@ impl App {
 
     fn mark_delivered(&mut self, pane: usize) {
         let mark = self.panes[pane].history_mark();
+        let model_id = self.model_id(pane);
         let Some(round) = self.rounds.last_mut() else {
             return;
         };
@@ -1383,8 +1389,51 @@ impl App {
                 round.followed_up[slot] = true;
             } else if round.state() == SummaryState::Waiting {
                 round.delivered[slot] = Some((Instant::now(), mark));
+                round.outputs[slot] = crate::summary::output_file(
+                    &round.prompt,
+                    &self.config.summary.output_vars,
+                    model_id.as_deref(),
+                )
+                .map(|path| (self.cwd.join(path), SystemTime::now()));
             }
         }
+    }
+
+    /// The modification time of the file a round's harness was asked to
+    /// write, if it has written it since the prompt was sent.
+    fn report_written(round: &Round, slot: usize) -> Option<SystemTime> {
+        let (path, sent) = round.outputs[slot].as_ref()?;
+        let meta = std::fs::metadata(path).ok()?;
+        let modified = meta.modified().ok()?;
+        (meta.len() > 0 && modified >= *sent).then_some(modified)
+    }
+
+    /// Whether the harness has finished its report: None if the prompt names
+    /// no output file, otherwise whether the file is written and unchanged
+    /// for `quiet`.
+    fn report_ready(round: &Round, slot: usize, quiet: Duration) -> Option<bool> {
+        round.outputs[slot].as_ref()?;
+        Some(
+            Self::report_written(round, slot)
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age >= quiet),
+        )
+    }
+
+    /// Captures a round's harness: its report file once written, otherwise
+    /// its screen.
+    fn capture_slot(&self, index: usize, slot: usize, mark: usize, finished: bool) -> Capture {
+        let pane = self.rounds[index].targets[slot];
+        let mut capture = self.capture(pane, mark, finished);
+        if let Some(modified) = Self::report_written(&self.rounds[index], slot)
+            && let Some((path, _)) = &self.rounds[index].outputs[slot]
+            && let Ok(text) = std::fs::read_to_string(path)
+        {
+            capture.text = text;
+            capture.styles.clear();
+            capture.report = Some((path.clone(), modified));
+        }
+        capture
     }
 
     fn capture(&self, pane: usize, mark: usize, finished: bool) -> Capture {
@@ -1415,6 +1464,7 @@ impl App {
             model: self.model_of(pane),
             at: Instant::now(),
             styles,
+            report: None,
         }
     }
 
@@ -1476,11 +1526,12 @@ impl App {
                     let quiet_now = at.elapsed() >= quiet
                         && !self.panes[pane].is_busy(quiet)
                         && !self.needs_input(pane)
-                        && !self.still_working(pane);
+                        && !self.still_working(pane)
+                        && Self::report_ready(&self.rounds[index], slot, quiet) != Some(false);
                     if !running || quiet_now {
-                        Some(self.capture(pane, mark, true))
+                        Some(self.capture_slot(index, slot, mark, true))
                     } else if timed_out && existing.is_none() {
-                        Some(self.capture(pane, mark, false))
+                        Some(self.capture_slot(index, slot, mark, false))
                     } else {
                         None
                     }
@@ -1539,9 +1590,12 @@ impl App {
         let Some(capture) = round.captures[slot].as_ref() else {
             return false;
         };
+        let rewritten = capture.report.as_ref().is_some_and(|(_, modified)| {
+            Self::report_written(round, slot).is_some_and(|now| now > *modified)
+        });
         let resumed = !round.followed_up[slot]
             && pane.status() == Status::Running
-            && pane.last_output().is_some_and(|t| t > capture.at);
+            && (pane.last_output().is_some_and(|t| t > capture.at) || rewritten);
         if !resumed {
             return false;
         }
@@ -1606,7 +1660,8 @@ impl App {
                 let mark = self.rounds[index].delivered[slot]
                     .map(|(_, mark)| mark)
                     .unwrap_or_else(|| self.panes[pane].history_mark());
-                self.rounds[index].captures[slot] = Some(self.capture(pane, mark, false));
+                self.rounds[index].captures[slot] =
+                    Some(self.capture_slot(index, slot, mark, false));
             }
         }
         if matches!(self.rounds[index].state(), SummaryState::Running { .. }) {
@@ -1792,8 +1847,17 @@ impl App {
                 ("working".into(), Color::Green)
             }
             None if self.still_working(pane) => ("working in the background".into(), Color::Green),
+            None if self.waiting_for_report(round, slot) => {
+                ("finishing its report".into(), Color::Green)
+            }
             None => ("settling".into(), Color::Green),
         }
+    }
+
+    /// Whether the round's harness has an output file it has not finished.
+    fn waiting_for_report(&self, round: &Round, slot: usize) -> bool {
+        let quiet = Duration::from_secs(self.config.summary.quiet_secs);
+        Self::report_ready(round, slot, quiet) == Some(false)
     }
 
     fn section_header(
@@ -1869,7 +1933,7 @@ impl App {
 
         for slot in 0..round.targets.len() {
             let answer = round.answer(slot);
-            let headline = answer.as_deref().and_then(crate::summary::headline);
+            let headline = round.headline(slot);
             lines.push((
                 self.section_header(
                     slot,
@@ -1879,9 +1943,16 @@ impl App {
                 ),
                 Some(slot),
             ));
-            if !self.summary_folded.get(slot).copied().unwrap_or(false)
-                && let Some(answer) = &answer
-            {
+            let unfolded = !self.summary_folded.get(slot).copied().unwrap_or(false);
+            if unfolded && let Some((path, _)) = &round.outputs[slot] {
+                let written = Self::report_written(round, slot).is_some();
+                let note = if written { "" } else { " (not written yet)" };
+                lines.push((
+                    Line::from(format!("    report: {}{note}", path.display())).dark_gray(),
+                    None,
+                ));
+            }
+            if unfolded && let Some(answer) = &answer {
                 if answer.trim().is_empty() {
                     lines.push((Line::from("    (no answer captured)").dark_gray(), None));
                 }
@@ -2141,7 +2212,7 @@ impl App {
             return;
         };
         let before = round.answer(section);
-        let capture = self.capture(pane, mark, true);
+        let capture = self.capture_slot(index, section, mark, true);
         self.log_capture(index, section, &capture);
         self.rounds[index].reopened[section] = before;
         self.store_capture(index, section, capture);
@@ -2825,6 +2896,64 @@ mod tests {
     }
 
     #[test]
+    fn harness_with_an_output_file_is_done_once_the_file_is_written() {
+        let dir = std::env::temp_dir().join(format!("agent-tabs-out-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("review-Rev-Model.md");
+        std::fs::write(&file, "verdict: stale report from an older run\n").unwrap();
+        let report =
+            "---\nverdict: approve\n---\n## Findings\n### Rev-Model-F1\n- severity: minor\n";
+        let script = format!(
+            "printf '\\033[?2004h'; read l; printf 'started\\r\\n'; sleep 2.2; printf '%b' '{}' > '{}'; printf 'wrote it\\r\\n'; sleep 30",
+            report.replace('\n', "\\n"),
+            file.display()
+        );
+        let mut reviewer = script_harness("rev", &script);
+        reviewer.model = Some("Rev Model".into());
+        let mut app = app_with(vec![reviewer, replying_harness("b")]);
+        thread::sleep(Duration::from_millis(200));
+        let prompt = format!(
+            "REVIEW_DIR={}\nOUTPUT_FILE=$REVIEW_DIR/review-$MODEL_ID.md\nReview it.",
+            dir.display()
+        );
+        compose_all(&mut app, &prompt);
+        assert_eq!(app.rounds[0].outputs[0].as_ref().unwrap().0, file);
+        assert!(app.rounds[0].outputs[1].is_none(), "b has no MODEL_ID");
+
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_millis(1800) {
+            app.deliver_pending();
+            app.tick_summary();
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            app.rounds[0].captures[0].is_none(),
+            "quiet, but no new report yet"
+        );
+        let text = summary_text(&app);
+        assert!(text.contains("finishing its report"), "{text}");
+        app.toggle_section(0);
+        let text = summary_text(&app);
+        assert!(text.contains("(not written yet)"), "{text}");
+
+        let start = Instant::now();
+        while app.rounds[0].captures[0].is_none() {
+            assert!(start.elapsed() < Duration::from_secs(10), "no capture");
+            app.tick_summary();
+            thread::sleep(Duration::from_millis(50));
+        }
+        let capture = app.rounds[0].captures[0].as_ref().unwrap();
+        assert!(capture.finished);
+        assert_eq!(capture.report.as_ref().unwrap().0, file);
+        assert_eq!(app.rounds[0].answer(0).unwrap(), report.trim_end());
+        assert_eq!(
+            app.rounds[0].headline(0).unwrap(),
+            "approve · 1 finding (1 minor)"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn a_follow_up_prompt_does_not_reopen_the_round() {
         let mut app = app_with(vec![replying_harness("a"), replying_harness("b")]);
         thread::sleep(Duration::from_millis(200));
@@ -2851,10 +2980,10 @@ mod tests {
         compose_all(&mut app, "first");
         wait_for(app.pane(0), "got:first");
         wait_for(app.pane(1), "got:first");
+        let lines = app.pane(0).text_since(0, 100);
         assert!(
-            screen(app.pane(0)).contains("got:MODEL_ID=Test-Model-high"),
-            "{}",
-            screen(app.pane(0))
+            lines.contains("got:MODEL_ID=Test-Model-high\ngot:first"),
+            "no blank line after MODEL_ID: {lines}"
         );
         assert!(
             !screen(app.pane(1)).contains("MODEL_ID"),

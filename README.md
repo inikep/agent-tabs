@@ -105,7 +105,6 @@ its model, so the model doesn't have to guess what it is:
 
 ```text
 MODEL_ID=Gemini-4-Argon-high
-
 <your prompt>
 ```
 
@@ -228,6 +227,40 @@ superseded; press `Ctrl+R` on it to summarize it anyway.
 Full-screen harnesses only expose what's on their screen, so a very long answer
 may be summarized from its last screenful.
 
+### Report files
+
+A prompt can ask each harness to write its answer to a file instead, with a
+`NAME=value` line for one of `output_vars` (`OUTPUT_FILE` or
+`REVIEW_COMBINED` by default):
+
+```text
+BASE=inikep/8.4
+TARGET=PS-11934-8.4-H08
+REVIEW_DIR=/data/sh/LLM/reviews/$TARGET
+OUTPUT_FILE=$REVIEW_DIR/review-$MODEL_ID.md
+Read instructions from /data/sh/LLM/prompts/review.md; the values above replace its placeholders.
+```
+
+agent-tabs works out each harness's file the way a shell would: `$NAME` and
+`${NAME}` are expanded from the lines above it and from the harness's
+`MODEL_ID`, so gpt-6 gets
+`/data/sh/LLM/reviews/PS-11934-8.4-H08/review-GPT-6-Astra-high.md`. A relative
+path is taken from agent-tabs' working directory. If the path can't be worked
+out (the model isn't known yet, or a variable isn't defined in the prompt),
+that harness is followed by its screen as usual.
+
+A harness with a report file is done only once it has written the file after
+the prompt was sent, the file hasn't changed for `quiet_secs`, and the harness
+itself is done by the usual rules. A report left over from an earlier run
+doesn't count. Until then its section says `finishing its report`, and the
+unfolded section shows the path, with `(not written yet)` while it's missing.
+When it's done, the section shows the file line for line, with headings in
+bold and `severity: blocker` / `major` in red and yellow. Folded, it shows the
+report's verdict and findings, e.g. `changes-requested · 3 findings (1 major,
+2 minor)`. A report rewritten later is read again, and the comparison runs
+again if it changed. `⟳` reads the file again right away. The comparison gets
+the report files instead of the screens.
+
 ## Selecting and copying text
 
 Drag with the left mouse button in any tab to select text; it's highlighted,
@@ -279,6 +312,7 @@ quiet_secs = 5
 wait_timeout_secs = 900
 run_timeout_secs = 300
 max_lines = 400
+output_vars = ["OUTPUT_FILE", "REVIEW_COMBINED"]
 
 [[harness]]
 name = "claude"

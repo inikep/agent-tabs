@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
 use ratatui::style::Style;
@@ -22,6 +22,11 @@ pub struct SummaryConfig {
     pub run_timeout_secs: u64,
     pub max_lines: usize,
     pub env_remove: Vec<String>,
+    /// Variables that name the file a prompt asks each harness to write, e.g.
+    /// `OUTPUT_FILE=$REVIEW_DIR/review-$MODEL_ID.md`. A harness given such a
+    /// prompt is done once it has written that file, which is shown instead
+    /// of its screen.
+    pub output_vars: Vec<String>,
 }
 
 impl Default for SummaryConfig {
@@ -39,6 +44,7 @@ impl Default for SummaryConfig {
                 "CLAUDE_CODE_ENTRYPOINT".into(),
                 "CLAUDE_CODE_CHILD_SESSION".into(),
             ],
+            output_vars: vec!["OUTPUT_FILE".into(), "REVIEW_COMBINED".into()],
         }
     }
 }
@@ -69,6 +75,8 @@ pub struct Capture {
     pub at: Instant,
     /// The harness's own style of each char, by line text.
     pub styles: HashMap<String, Vec<Style>>,
+    /// The output file `text` was read from, and its modification time.
+    pub report: Option<(PathBuf, SystemTime)>,
 }
 
 /// A line of chars, each with the style the harness drew it in.
@@ -91,6 +99,9 @@ pub struct Round {
     /// The answer of a finished harness that started working again, kept to
     /// tell whether its new answer differs.
     pub reopened: Vec<Option<String>>,
+    /// The file the prompt asked each harness to write, and when the prompt
+    /// was sent; only a file written after that counts.
+    pub outputs: Vec<Option<(PathBuf, SystemTime)>>,
 }
 
 pub fn read_state(state: &Arc<Mutex<SummaryState>>) -> SummaryState {
@@ -115,6 +126,7 @@ impl Round {
             compared_unfinished: false,
             followed_up: vec![false; n],
             reopened: vec![None; n],
+            outputs: vec![None; n],
         }
     }
 
@@ -124,14 +136,31 @@ impl Round {
 
     pub fn answer(&self, slot: usize) -> Option<String> {
         let capture = self.captures[slot].as_ref()?;
+        if capture.report.is_some() {
+            return Some(capture.text.trim_end().to_string());
+        }
         Some(final_message(&extract_answer(&capture.text, &self.prompt)))
     }
 
-    /// The answer reflowed for display, in the harness's own colors.
+    /// The answer reflowed for display, in the harness's own colors. A report
+    /// file is shown line for line.
     pub fn answer_lines(&self, slot: usize) -> Option<Vec<Cells>> {
         let answer = self.answer(slot)?;
-        let styles = &self.captures[slot].as_ref()?.styles;
-        Some(reflow_styled(&answer, styles))
+        let capture = self.captures[slot].as_ref()?;
+        if capture.report.is_some() {
+            return Some(report_lines(&answer));
+        }
+        Some(reflow_styled(&answer, &capture.styles))
+    }
+
+    /// One line shown on a folded section.
+    pub fn headline(&self, slot: usize) -> Option<String> {
+        let answer = self.answer(slot)?;
+        let report = self.captures[slot].as_ref()?.report.is_some();
+        report
+            .then(|| report_headline(&answer))
+            .flatten()
+            .or_else(|| headline(&answer))
     }
 
     pub fn set_state(&self, state: SummaryState) {
@@ -163,6 +192,123 @@ impl Round {
             .collect();
         build_prompt(&self.prompt, &entries)
     }
+}
+
+/// The file `prompt` asks to be written: the value of the first of `vars`
+/// assigned in its `NAME=value` lines, with `$NAME` and `${NAME}` expanded from
+/// the lines before it and from `model_id` as `MODEL_ID`. None if no such
+/// line exists or it uses a variable that is not defined.
+pub fn output_file(prompt: &str, vars: &[String], model_id: Option<&str>) -> Option<PathBuf> {
+    static ASSIGNMENT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$").expect("valid regex")
+    });
+    let mut values: HashMap<String, Option<String>> = HashMap::new();
+    if let Some(model_id) = model_id {
+        values.insert("MODEL_ID".into(), Some(model_id.to_string()));
+    }
+    for line in prompt.lines() {
+        let Some(caps) = ASSIGNMENT.captures(line) else {
+            continue;
+        };
+        let mut value = caps[2].trim();
+        if let Some((before, _)) = value.split_once(" #") {
+            value = before.trim_end();
+        }
+        let value = value
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+            .unwrap_or(value);
+        let expanded = expand_vars(value, &values);
+        values.insert(caps[1].to_string(), expanded);
+    }
+    vars.iter()
+        .find_map(|var| values.get(var))
+        .cloned()
+        .flatten()
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
+fn expand_vars(value: &str, values: &HashMap<String, Option<String>>) -> Option<String> {
+    static VAR: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
+            .expect("valid regex")
+    });
+    let mut out = String::new();
+    let mut last = 0;
+    for caps in VAR.captures_iter(value) {
+        let whole = caps.get(0).expect("match");
+        let name = caps.get(1).or_else(|| caps.get(2)).expect("name").as_str();
+        out.push_str(&value[last..whole.start()]);
+        out.push_str(values.get(name)?.as_deref()?);
+        last = whole.end();
+    }
+    out.push_str(&value[last..]);
+    Some(out)
+}
+
+/// A report's verdict and findings for a folded section, e.g.
+/// `changes-requested · 3 findings (1 major, 2 minor)`.
+pub fn report_headline(report: &str) -> Option<String> {
+    let field = |line: &str, name: &str| {
+        line.trim()
+            .trim_start_matches("- ")
+            .strip_prefix(name)
+            .and_then(|rest| rest.strip_prefix(':'))
+            .map(|v| v.trim().to_string())
+    };
+    let verdict = report.lines().find_map(|l| field(l, "verdict"))?;
+    let mut findings = 0;
+    let mut severities: Vec<(String, usize)> = Vec::new();
+    let mut in_findings = false;
+    for line in report.lines() {
+        if let Some(heading) = line.strip_prefix("## ") {
+            in_findings = heading.trim().eq_ignore_ascii_case("findings");
+        } else if in_findings && line.starts_with("### ") {
+            findings += 1;
+        } else if in_findings && let Some(severity) = field(line, "severity") {
+            let severity = severity.split_whitespace().next().unwrap_or("").to_string();
+            match severities.iter_mut().find(|(s, _)| *s == severity) {
+                Some((_, n)) => *n += 1,
+                None => severities.push((severity, 1)),
+            }
+        }
+    }
+    let mut text = format!(
+        "{verdict} · {findings} finding{}",
+        if findings == 1 { "" } else { "s" }
+    );
+    if !severities.is_empty() {
+        let list: Vec<String> = severities.iter().map(|(s, n)| format!("{n} {s}")).collect();
+        text.push_str(&format!(" ({})", list.join(", ")));
+    }
+    Some(text)
+}
+
+/// A Markdown report, one display line per line, with headings in bold and
+/// blocker and major severities in red and yellow.
+fn report_lines(report: &str) -> Vec<Cells> {
+    use ratatui::style::{Color, Modifier};
+    report
+        .lines()
+        .map(|line| {
+            let text = line.trim_end();
+            let lower = text.to_ascii_lowercase();
+            let style = if text.starts_with('#') {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else if lower.contains("severity: blocker") {
+                Style::default().fg(Color::Red)
+            } else if lower.contains("severity: major") {
+                Style::default().fg(Color::Yellow)
+            } else if text == "---" {
+                Style::default().add_modifier(Modifier::DIM)
+            } else {
+                Style::default()
+            };
+            text.chars().map(|c| (c, style)).collect()
+        })
+        .collect()
 }
 
 /// A row or border of a table drawn with box characters, as in
@@ -541,7 +687,8 @@ pub fn build_prompt(prompt: &str, entries: &[(&str, &Capture)]) -> String {
         "You are given the answers of several AI coding agents to the same prompt. Each answer is a \
 capture of that agent's terminal screen, so it can contain UI chrome such as input boxes, status \
 bars, spinners, tips and placeholder suggestions shown in an empty input box. Placeholders are not \
-user input. Ignore the chrome and focus on what each agent said and did.\n\n\
+user input. Ignore the chrome and focus on what each agent said and did. An agent with a report \
+attribute wrote that file as its answer, and its text is that file rather than a screen.\n\n\
 Write a concise comparison for a software engineer with these sections:\n\
 Consensus: what all or most agents agree on.\n\
 Differences: notable disagreements or unique points, attributed to agents by name.\n\
@@ -563,8 +710,13 @@ Keep it under 300 words, as plain text with short bullet points. Do not use any 
             .as_deref()
             .map(|m| format!(" model=\"{}\"", m.replace('"', "'")))
             .unwrap_or_default();
+        let report = capture
+            .report
+            .as_ref()
+            .map(|(path, _)| format!(" report=\"{}\"", path.display()))
+            .unwrap_or_default();
         out.push_str(&format!(
-            "\n<agent name=\"{name}\"{model} status=\"{status}\">\n"
+            "\n<agent name=\"{name}\"{model}{report} status=\"{status}\">\n"
         ));
         let text = capture.text.trim();
         out.push_str(if text.is_empty() {
@@ -666,6 +818,7 @@ mod tests {
             model: None,
             at: Instant::now(),
             styles: HashMap::new(),
+            report: None,
         }
     }
 
@@ -833,6 +986,47 @@ mod tests {
             "{lines:#?}"
         );
         assert!(is_tool_line("  └ out.txt") && is_tool_line("  │ x"));
+    }
+
+    #[test]
+    fn output_file_expands_the_prompts_variables() {
+        let vars = SummaryConfig::default().output_vars;
+        let prompt = "BASE=inikep/8.4\nTARGET=PS-11934-8.4-H08\nREVIEW_DIR=/data/reviews/$TARGET\nOUTPUT_FILE=$REVIEW_DIR/review-${MODEL_ID}.md\nRead instructions from review.md.";
+        assert_eq!(
+            output_file(prompt, &vars, Some("GPT-6-Astra-high")),
+            Some(PathBuf::from(
+                "/data/reviews/PS-11934-8.4-H08/review-GPT-6-Astra-high.md"
+            ))
+        );
+        assert_eq!(output_file(prompt, &vars, None), None, "MODEL_ID unknown");
+        assert_eq!(output_file("just a question", &vars, Some("M")), None);
+        let merge = "TARGET=T\nREVIEW_FILES=/r/$TARGET/review-*.md\nREVIEW_COMBINED=\"/r/$TARGET/combined.md\"  # merged";
+        assert_eq!(
+            output_file(merge, &vars, None),
+            Some(PathBuf::from("/r/T/combined.md"))
+        );
+        assert_eq!(
+            output_file("OUTPUT_FILE=$NOPE/x.md", &vars, Some("M")),
+            None
+        );
+        assert_eq!(
+            output_file("OUTPUT_FILE=out/$MODEL_ID.md", &vars, Some("M")),
+            Some(PathBuf::from("out/M.md"))
+        );
+    }
+
+    #[test]
+    fn report_headline_gives_verdict_and_findings() {
+        let report = "---\nmodel: M\nverdict: changes-requested\n---\n\n## Findings\n\n### M-F1\n- title: a\n- severity: major\n\n### M-F2\n- severity: minor\n\n### M-F3\n- severity: minor\n\n## Checked and correct\n- x: ok\n";
+        assert_eq!(
+            report_headline(report).unwrap(),
+            "changes-requested · 3 findings (1 major, 2 minor)"
+        );
+        assert_eq!(
+            report_headline("verdict: approve\n## Findings\nnone\n").unwrap(),
+            "approve · 0 findings"
+        );
+        assert!(report_headline("# Notes\nno front matter").is_none());
     }
 
     #[test]
