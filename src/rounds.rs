@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
-pub struct SummaryConfig {
+pub struct MainConfig {
     /// Whether to compare the answers of a round with `command`, shown as a
     /// last "comparison" section.
     pub compare: bool,
@@ -32,7 +32,7 @@ pub struct SummaryConfig {
     pub output_vars: Vec<String>,
 }
 
-impl Default for SummaryConfig {
+impl Default for MainConfig {
     fn default() -> Self {
         Self {
             compare: false,
@@ -53,7 +53,7 @@ impl Default for SummaryConfig {
     }
 }
 
-impl SummaryConfig {
+impl MainConfig {
     pub fn command_line(&self) -> String {
         std::iter::once(self.command.as_str())
             .chain(self.args.iter().map(String::as_str))
@@ -748,7 +748,7 @@ Keep it under 300 words, as plain text with short bullet points. Do not use any 
     out
 }
 
-pub fn run_summarizer(config: &SummaryConfig, input: &str, cwd: &Path) -> Result<String> {
+pub fn run_summarizer(config: &MainConfig, input: &str, cwd: &Path) -> Result<String> {
     let mut cmd = Command::new(&config.command);
     cmd.args(&config.args)
         .current_dir(cwd)
@@ -841,12 +841,12 @@ mod tests {
         }
     }
 
-    fn shell(script: &str) -> SummaryConfig {
-        SummaryConfig {
+    fn shell(script: &str) -> MainConfig {
+        MainConfig {
             command: "sh".into(),
             args: vec!["-c".into(), script.into()],
             run_timeout_secs: 5,
-            ..SummaryConfig::default()
+            ..MainConfig::default()
         }
     }
 
@@ -1009,7 +1009,7 @@ mod tests {
 
     #[test]
     fn output_file_expands_the_prompts_variables() {
-        let vars = SummaryConfig::default().output_vars;
+        let vars = MainConfig::default().output_vars;
         let prompt = "BASE=inikep/8.4\nTARGET=PS-11934-8.4-H08\nREVIEW_DIR=/data/reviews/$TARGET\nOUTPUT_FILE=$REVIEW_DIR/review-${MODEL_ID}.md\nRead instructions from review.md.";
         assert_eq!(
             output_file(prompt, &vars, Some("GPT-6-Astra-high")),
@@ -1281,9 +1281,9 @@ mod tests {
 
     #[test]
     fn missing_command_is_an_error() {
-        let config = SummaryConfig {
+        let config = MainConfig {
             command: "no-such-summarizer-xyz".into(),
-            ..SummaryConfig::default()
+            ..MainConfig::default()
         };
         assert!(run_summarizer(&config, "x", Path::new(".")).is_err());
     }

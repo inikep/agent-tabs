@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::summary::SummaryConfig;
+use crate::rounds::MainConfig;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Harness {
@@ -219,8 +219,10 @@ pub struct Config {
     pub input_patterns: Vec<String>,
     #[serde(default = "default_working_patterns")]
     pub working_patterns: Vec<String>,
-    #[serde(default)]
-    pub summary: SummaryConfig,
+    /// The main tab's settings, `[main]`; `[summary]`, its old name, is
+    /// still accepted.
+    #[serde(default, alias = "summary")]
+    pub main: MainConfig,
     #[serde(rename = "harness", default = "default_harnesses")]
     pub harnesses: Vec<Harness>,
 }
@@ -321,7 +323,7 @@ impl Default for Config {
             dialog_patterns: default_dialog_patterns(),
             input_patterns: default_input_patterns(),
             working_patterns: default_working_patterns(),
-            summary: SummaryConfig::default(),
+            main: MainConfig::default(),
             harnesses: default_harnesses(),
         }
     }
@@ -447,16 +449,21 @@ mod tests {
     }
 
     #[test]
-    fn summary_section_overrides_defaults() {
-        let parsed: Config = toml::from_str(
-            "[summary]\ncommand = \"codex\"\nargs = [\"exec\", \"-\"]\nauto = false\n",
-        )
-        .unwrap();
-        assert_eq!(parsed.summary.command, "codex");
-        assert_eq!(parsed.summary.args, ["exec", "-"]);
-        assert!(!parsed.summary.auto);
-        assert_eq!(parsed.summary.quiet_secs, 5);
+    fn main_section_overrides_defaults() {
+        let parsed: Config =
+            toml::from_str("[main]\ncommand = \"codex\"\nargs = [\"exec\", \"-\"]\nauto = false\n")
+                .unwrap();
+        assert_eq!(parsed.main.command, "codex");
+        assert_eq!(parsed.main.args, ["exec", "-"]);
+        assert!(!parsed.main.auto);
+        assert_eq!(parsed.main.quiet_secs, 5);
         assert_eq!(parsed.harnesses.len(), 4);
+    }
+
+    #[test]
+    fn old_summary_section_name_still_works() {
+        let parsed: Config = toml::from_str("[summary]\nquiet_secs = 9\n").unwrap();
+        assert_eq!(parsed.main.quiet_secs, 9);
     }
 
     #[test]

@@ -2,7 +2,7 @@ submit_delay_ms = 150
 scrollback = 20000
 mouse = true
 
-[summary]
+[main]
 # Compare each round's answers with `command` (off: a script's merge step
 # does that better).
 compare = false

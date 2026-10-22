@@ -10,7 +10,7 @@
 //! Merge the reviews.
 //! ```
 
-use crate::summary::{assignment, expand_vars, variables};
+use crate::rounds::{assignment, expand_vars, variables};
 
 const COMMANDS: [&str; 4] = ["send", "wait-model-files", "wait-file", "wait-done"];
 

@@ -168,7 +168,8 @@ Whenever you send a prompt to two or more harnesses, agent-tabs starts a
    timing lines. That is claude's last `●` paragraph, codex's last `•` message,
    and agy's or cursor's closing text. It's shown straight away as that
    harness's section, rewrapped to the tab's width.
-3. With `compare = true` under `[summary]` (off by default), when every
+3. With `compare = true` under `[main]` (off by default; `[summary]`, the
+   section's old name, still works), when every
    harness is done agent-tabs pipes the prompt and all captures to the
    summarizer, which writes a `comparison` section: consensus, differences,
    the best answer and concerns. Without it, a round is just the answers; a
@@ -388,7 +389,7 @@ input_patterns = [
   "(?i)would you like to (run|make|apply|allow)",
 ]
 
-[summary]
+[main]
 compare = false
 command = "claude"
 args = ["--print", "--model", "claude-opus-5-5"]

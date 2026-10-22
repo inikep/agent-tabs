@@ -5,8 +5,8 @@ mod config;
 mod keys;
 mod pane;
 mod render;
+mod rounds;
 mod script;
-mod summary;
 
 use std::io::{Write, stdout};
 use std::path::PathBuf;
