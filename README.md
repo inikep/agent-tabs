@@ -84,7 +84,7 @@ In the prompt composer:
 
 A harness with `enabled = false` in the config is not started with
 agent-tabs and has no tab. It is still listed, unchecked, in the prompt boxes
-(the summary tab's and `Ctrl+\` `a`). Check it there, by clicking `[ ] name` or
+(the main tab's and `Ctrl+\` `a`). Check it there, by clicking `[ ] name` or
 with `Alt+N` in the composer, and agent-tabs starts it and shows its tab right
 away. From then on it is treated like any other harness. `--only` starts the
 harnesses it names even when they are disabled.
@@ -108,7 +108,7 @@ MODEL_ID=Gemini-4-Argon-high
 <your prompt>
 ```
 
-The name is the one the summary tab shows, without the provider and with
+The name is the one the main tab shows, without the provider and with
 spaces replaced by `-`. It's added
 once per harness session (a restarted tab gets it again), and left off until
 the model is known. Text you type directly into a tab is never changed. Set
@@ -138,9 +138,9 @@ handle their own scrolling, so `PgUp`/`PgDn` and the mouse wheel are passed
 through to them. For inline harnesses such as cursor-agent, agent-tabs keeps up
 to `scrollback` lines of history.
 
-## Summary tab
+## Main tab
 
-The first tab is the `summary` tab (`Alt+1`), and agent-tabs starts on it.
+The first tab is the `main` tab (`Alt+1`), and agent-tabs starts on it.
 The harness tabs follow in config order (`Alt+2` is the first harness).
 Whenever you send a prompt to two or more harnesses, agent-tabs starts a
 *round*:
@@ -168,13 +168,16 @@ Whenever you send a prompt to two or more harnesses, agent-tabs starts a
    timing lines. That is claude's last `●` paragraph, codex's last `•` message,
    and agy's or cursor's closing text. It's shown straight away as that
    harness's section, rewrapped to the tab's width.
-3. When every harness is done, agent-tabs pipes the prompt and all captures to
-   the summarizer, which writes the comparison: consensus, differences, the
-   best answer and concerns.
+3. With `compare = true` under `[summary]` (off by default), when every
+   harness is done agent-tabs pipes the prompt and all captures to the
+   summarizer, which writes a `comparison` section: consensus, differences,
+   the best answer and concerns. Without it, a round is just the answers; a
+   script's merge step does the comparing better.
 
 The summarizer command is `claude --print` by default, run in a temporary
 directory so it can't read your repo. It is called once per round, for the
-comparison.
+comparison. The rest of this section describes `compare = true` where it
+mentions the comparison.
 
 Each section header names the harness, its model and the provider, e.g.
 `muse-wonder · Muse Wonder 300K High (Cursor)`. The model is read from the
@@ -197,29 +200,35 @@ section) to capture that harness's answer again right now and count it as
 done, for when agent-tabs got it wrong. If the answer changed, the comparison
 runs again. The `⟳` on the `comparison` header does the same as `Ctrl+R`.
 
-The tab marker shows the round's state: `⧗` waiting for answers, `…`
-summarizing, `●` a new summary you haven't looked at, `!` failed.
+While a script runs, the main tab's marker shows it: `▶` sending or waiting
+for harnesses to finish, `⏸` waiting for files, then `✓` (finished) or `✗`
+(cancelled) until you look at the tab. Otherwise the marker shows the latest
+round's state: `⧗` waiting for answers, `●`
+all answers are in and you haven't looked yet; with `compare = true`, `…`
+comparing, `●` a new comparison you haven't looked at, `!` failed.
 
-The summary tab has its own prompt box at the bottom, always active: type a prompt
+The main tab has its own prompt box at the bottom, always active: type a prompt
 and press `Enter` to send it to every ticked harness. All are ticked at first,
 except disabled harnesses that haven't been started;
 click a `[x] name` label in the box's title to untick or tick one, and the
 choice is kept for later prompts. `[x]` only means "send to this harness"; the
 tab markers show whether a harness is working. You can then watch the round
-progress and read the summary without leaving the tab. The box edits like the
+progress and read the answers without leaving the tab. The box edits like the
 composer (`Alt+Enter` for a new line, `↑`/`↓` for history, `Esc` to clear), so
 the tab's own commands use control keys:
 
-| Key (in the summary tab) | Action |
+| Key (in the main tab) | Action |
 |---|---|
 | typing, `Enter` | Write a prompt and send it to all harnesses |
-| `Ctrl+R` | Summarize now, or re-run the round being viewed. With no rounds yet, summarizes what every harness currently shows |
+| `Ctrl+R` | Take every answer of the round being viewed as it is now (with `compare = true`: summarize now, or re-run the comparison). With no rounds yet, uses what every harness currently shows |
 | `⟳` in a header, `Ctrl+L` | Capture that harness's answer again now (`Ctrl+L`: the focused section) |
 | `Ctrl+P` / `Ctrl+N` | Previous / next round |
+| `Ctrl+S` | Skip the wait a script is on |
+| `Ctrl+X` | Cancel the running script |
 | `Tab` / `Shift+Tab` | Move focus between sections |
 | left click on a header, `Ctrl+O` | Fold or unfold that section (`Ctrl+O`: the focused one) |
 | `Ctrl+E` | Fold or unfold all sections |
-| `PgUp` / `PgDn`, `Ctrl+↑` / `Ctrl+↓`, mouse wheel | Scroll the summary |
+| `PgUp` / `PgDn`, `Ctrl+↑` / `Ctrl+↓`, mouse wheel | Scroll the main tab |
 
 A new broadcast sent before the previous round finished marks that round as
 superseded; press `Ctrl+R` on it to summarize it anyway.
@@ -252,7 +261,9 @@ that harness is followed by its screen as usual.
 A harness with a report file is done only once it has written the file after
 the prompt was sent, the file hasn't changed for `quiet_secs`, and the harness
 itself is done by the usual rules. A report left over from an earlier run
-doesn't count. Until then its section says `finishing its report`, and the
+doesn't count. Once the harness has been sent another prompt (a script's
+next step, say), its screen belongs to that prompt, so the settled file alone
+is enough. Until then its section says `finishing its report`, and the
 unfolded section shows the path, with `(not written yet)` while it's missing.
 When it's done, the section shows the file line for line, with headings in
 bold and `severity: blocker` / `major` in red and yellow. Folded, it shows the
@@ -261,11 +272,84 @@ report's verdict and findings, e.g. `changes-requested · 3 findings (1 major,
 again if it changed. `⟳` reads the file again right away. The comparison gets
 the report files instead of the screens.
 
+### Scripts
+
+A prompt with `::` command lines runs as a script: a sequence of prompts to
+different harnesses, each started when the previous step's files are written
+or its harnesses are done. Type or paste it into either prompt box; the
+targets checked in the box don't matter, because the script names its own.
+
+```text
+TARGET=PS-11934-8.4-H10
+REVIEW_DIR=/data/sh/LLM/reviews/$TARGET
+
+::# 1. Every enabled model reviews the branch into its own file
+::send all
+BASE=inikep/8.4
+OUTPUT_FILE=$REVIEW_DIR/review-$MODEL_ID.md
+Read instructions from /data/sh/LLM/prompts/review.md
+
+::wait-model-files $OUTPUT_FILE
+
+::# 2. Opus merges the reviews
+::send opus-5.5
+REVIEW_FILES=$REVIEW_DIR/review-*.md
+REVIEW_COMBINED=$REVIEW_DIR/review-combined.md
+Read instructions from /data/sh/LLM/prompts/review-merge.md
+
+::wait-file $REVIEW_COMBINED
+
+::# 3. Opus fixes the issues
+::send opus-5.5
+Fix all issues in current branch in /work/mysql-server/work
+
+::wait-done
+
+::# 4. Every model checks the fixes
+::send all
+REVIEW_COMBINED=$REVIEW_DIR/review-combined.md
+Check if all issues from $REVIEW_COMBINED were fixed in $TARGET
+```
+
+| Command | Meaning |
+|---|---|
+| `::send TARGET…` | Send the text up to the next command to the targets, as a round in the main tab |
+| `::wait-model-files PATH [TARGET…]` | Wait for one file per target, with `$MODEL_ID` in `PATH` set to each one's model |
+| `::wait-file PATH` | Wait for one file |
+| `::wait-done [TARGET…]` | Wait until the targets are done, by the same rules as a round |
+| `::# text` | A comment; never sent |
+
+- A target is a tab name, or `all` for every harness that isn't disabled. A
+  disabled harness named in `::send` is started. Without targets, a wait is
+  for the targets of the last `::send`. Quote an argument with spaces.
+- The `NAME=value` lines before the first command are shared: they're put at
+  the top of every prompt the script sends. Prompts are sent as written, with
+  `$NAME` left for the model; agent-tabs expands `$NAME` and `${NAME}` only to
+  find the files to wait for, from the shared lines and the last `::send`'s
+  lines.
+- A file counts once it is written after its `::send` and hasn't changed for
+  `quiet_secs`. A model whose `MODEL_ID` isn't known yet is waited for until
+  it is done instead. Waits have no timeout: `Ctrl+S` in the main tab skips
+  the wait the script is on (for a model that never writes its file), and
+  `Ctrl+X` cancels the script; prompts already sent keep running.
+- Each `::send` is a round, even for one harness (a single harness isn't
+  compared), and a script's rounds don't supersede each other. The script's
+  steps are listed above the rounds: `✓` done, `●` the step it's on and what
+  it waits for, `⤼` skipped, `✗` where it was cancelled.
+- The whole script is checked when you press Enter, and nothing is sent if
+  something is wrong; the error names the line and the text stays in the box.
+  A command has to start its line; text before the first `::send` other than
+  `NAME=value` lines, text after a wait, a `::send` with no text or only
+  `NAME=value` lines, an unknown target and an undefined variable in a wait's
+  path are all errors. So is any prompt, script or not, made only of
+  `NAME=value` lines, since it gives the models nothing to do.
+- One script runs at a time.
+
 ## Selecting and copying text
 
 Drag with the left mouse button in any tab to select text; it's highlighted,
 and copied when you release the button. A plain click clears the selection; in
-the summary tab a click on a section header still folds it.
+the main tab a click on a section header still folds it.
 
 - In harness tabs, the selection comes from the emulated terminal, so lines
   the harness wrapped are joined back together.
@@ -305,6 +389,7 @@ input_patterns = [
 ]
 
 [summary]
+compare = false
 command = "claude"
 args = ["--print", "--model", "claude-opus-5-5"]
 auto = true
@@ -349,7 +434,7 @@ With `--log-dir DIR`, agent-tabs writes:
   terminal of the same size to replay it.
 - `DIR/prompts.log`: every prompt sent from the composer, with a timestamp and
   its targets.
-- `DIR/summaries.log`: every summary, with the prompt it summarizes.
+- `DIR/summaries.log`: every comparison (with `compare = true`), with the prompt it compares.
 - `DIR/captures/`: the screen text captured from each harness for each round,
   which is what its section and the comparison are built from.
 

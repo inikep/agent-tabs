@@ -25,6 +25,7 @@ use crate::config::{Config, Harness};
 use crate::keys;
 use crate::pane::{Pane, Size, Status};
 use crate::render::draw_term;
+use crate::script::{Command, Step, Targets};
 use crate::summary::{Capture, Round, SummaryState, run_summarizer};
 
 const BUSY_WINDOW: Duration = Duration::from_millis(1500);
@@ -53,7 +54,10 @@ pub struct App {
     dirty: Arc<AtomicBool>,
     pane_size: Size,
     tab_spans: Vec<(u16, u16)>,
-    message: Option<(String, Instant)>,
+    /// A status-line message, when it was shown, and whether it is an error
+    /// (shown longer, in red).
+    message: Option<(String, Instant, bool)>,
+    run: Option<Run>,
     pending: Vec<(usize, String)>,
     dialogs: regex::RegexSet,
     rounds: Vec<Round>,
@@ -99,6 +103,40 @@ enum Drag {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StepState {
+    Pending,
+    Active,
+    Done,
+    Skipped,
+}
+
+/// A script being run: its steps, and what the waits need to know.
+struct Run {
+    steps: Vec<Step>,
+    states: Vec<StepState>,
+    cancelled: bool,
+    /// The targets of the last `::send`, and when it was sent.
+    last_send: Option<(Vec<usize>, Instant, SystemTime)>,
+    started: (Instant, SystemTime),
+    /// What the current wait is waiting for.
+    detail: String,
+    /// Whether the main tab has been looked at since the script ended.
+    seen: bool,
+}
+
+impl Run {
+    fn running(&self) -> bool {
+        !self.cancelled && self.current().is_some()
+    }
+
+    fn current(&self) -> Option<usize> {
+        self.states
+            .iter()
+            .position(|s| matches!(s, StepState::Pending | StepState::Active))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Readiness {
     Ready,
     NoPaste,
@@ -127,6 +165,13 @@ fn styled_line(prefix: &str, cells: crate::summary::Cells) -> Line<'static> {
         spans.push(Span::styled(run, style));
     }
     Line::from(spans)
+}
+
+/// Whether a file modified at `modified` was written after `since`. File times
+/// come from the kernel's coarse clock, which can lag the system time by a
+/// few milliseconds, so a file written right after `since` may look older.
+fn written_since(modified: SystemTime, since: SystemTime) -> bool {
+    modified + Duration::from_millis(500) >= since
 }
 
 /// Drawn after the fold arrow of each summary section header.
@@ -381,6 +426,7 @@ impl App {
             prompt_widths: std::cell::RefCell::new(std::collections::HashMap::new()),
             exit_span: (0, 0),
             quit: false,
+            run: None,
         };
         app.dialogs = app.config.dialog_regex()?;
         app.inputs = app.config.input_regex()?;
@@ -456,7 +502,21 @@ impl App {
     }
 
     fn flash(&mut self, text: impl Into<String>) {
-        self.message = Some((text.into(), Instant::now()));
+        self.message = Some((text.into(), Instant::now(), false));
+    }
+
+    fn flash_error(&mut self, text: impl Into<String>) {
+        self.message = Some((text.into(), Instant::now(), true));
+    }
+
+    fn flash_span(&self) -> Option<Span<'static>> {
+        let (text, at, error) = self.message.as_ref()?;
+        let shown = if *error { 15 } else { 4 };
+        if at.elapsed() >= Duration::from_secs(shown) {
+            return None;
+        }
+        let span = Span::raw(format!(" {text}"));
+        Some(if *error { span.red() } else { span.yellow() })
     }
 
     pub fn deliver_pending(&mut self) {
@@ -533,6 +593,9 @@ impl App {
                 self.deliver_pending();
                 redraw = true;
             }
+            if self.tick_run() {
+                redraw = true;
+            }
             if self.tick_summary() {
                 redraw = true;
             }
@@ -604,6 +667,9 @@ impl App {
             self.active = index;
             if self.on_summary() {
                 self.summary_unseen = false;
+                if let Some(run) = self.run.as_mut().filter(|r| !r.running()) {
+                    run.seen = true;
+                }
             }
         }
     }
@@ -786,8 +852,11 @@ impl App {
             ComposerAction::None => {}
             ComposerAction::Cancel => self.mode = Mode::Normal,
             ComposerAction::Submit { text, targets } => {
-                self.submit_prompt(&text, &targets);
-                self.mode = Mode::Normal;
+                if self.submit(&text, &targets) {
+                    self.mode = Mode::Normal;
+                } else {
+                    self.composer.insert_str(&text);
+                }
             }
         }
     }
@@ -823,15 +892,45 @@ impl App {
         self.panes[pane].send_prompt(&text, delay);
     }
 
-    fn submit_prompt(&mut self, text: &str, targets: &[usize]) {
+    /// Sends a prompt from a prompt box, or starts it as a script if it has
+    /// `::` commands. Returns false, with the reason shown, if nothing was
+    /// sent.
+    fn submit(&mut self, text: &str, targets: &[usize]) -> bool {
+        let names: Vec<&str> = self.panes.iter().map(Pane::name).collect();
+        match crate::script::parse(text, &names) {
+            Ok(None) => {
+                self.submit_prompt(text, targets, false);
+                true
+            }
+            Ok(Some(_)) if self.run.as_ref().is_some_and(Run::running) => {
+                self.flash_error(
+                    "not sent: a script is already running; Ctrl+X in the main tab cancels it",
+                );
+                false
+            }
+            Ok(Some(steps)) => {
+                self.start_run(steps);
+                true
+            }
+            Err(err) => {
+                self.flash_error(format!("not sent: {err}"));
+                false
+            }
+        }
+    }
+
+    /// Sends `text` to `targets`. A prompt to several harnesses, or any
+    /// prompt from a script, is followed as a round in the summary tab.
+    fn submit_prompt(&mut self, text: &str, targets: &[usize], from_script: bool) {
         let delay = Duration::from_millis(self.config.submit_delay_ms);
         let mut sent = Vec::new();
         let mut queued = Vec::new();
         for &i in targets {
             self.start(i);
         }
-        if targets.len() >= 2 {
-            self.start_round(text, targets);
+        if targets.len() >= 2 || from_script {
+            // A script's earlier rounds are still compared.
+            self.start_round(text, targets, !from_script);
         }
         for &i in targets {
             if self.readiness(i) == Readiness::Ready {
@@ -1160,15 +1259,13 @@ impl App {
     fn status_line(&self) -> Line<'static> {
         let hint = |s: &str| Span::raw(s.to_string()).dark_gray();
         if self.on_summary() && matches!(self.mode, Mode::Normal | Mode::Help) {
-            let mut spans = vec![Span::raw(" summary ").black().on_magenta()];
-            if let Some((text, at)) = &self.message
-                && at.elapsed() < Duration::from_secs(4)
-            {
-                spans.push(Span::raw(format!(" {text}")).yellow());
-            }
-            spans.push(hint(
-                "  Enter send to all · Alt+Enter newline · Ctrl+R summarize · Ctrl+P/N round · PgUp/PgDn scroll",
-            ));
+            let mut spans = vec![Span::raw(" main ").black().on_magenta()];
+            spans.extend(self.flash_span());
+            spans.push(hint(if self.config.summary.compare {
+                "  Enter send to all · Alt+Enter newline · Ctrl+R summarize · Ctrl+P/N round · PgUp/PgDn scroll"
+            } else {
+                "  Enter send to all · Alt+Enter newline · Ctrl+R capture all · Ctrl+P/N round · PgUp/PgDn scroll"
+            }));
             return Line::from(spans);
         }
         let pane = &self.panes[self.active.min(self.panes.len() - 1)];
@@ -1179,12 +1276,15 @@ impl App {
                     " 1-9 tab · n/p next/prev · a prompt all · s prompt this · [ scroll · r restart · q quit · ? help · Esc cancel",
                 ),
             ]),
-            Mode::Compose => Line::from(vec![
-                Span::raw(" PROMPT ").black().on_cyan(),
-                hint(
-                    " Enter send · Alt+Enter/Ctrl+J newline · Alt+1-9 toggle target · Ctrl+A all · ↑↓ history · Esc cancel",
-                ),
-            ]),
+            Mode::Compose => match self.flash_span() {
+                Some(message) => Line::from(vec![Span::raw(" PROMPT ").black().on_cyan(), message]),
+                None => Line::from(vec![
+                    Span::raw(" PROMPT ").black().on_cyan(),
+                    hint(
+                        " Enter send · Alt+Enter/Ctrl+J newline · Alt+1-9 toggle target · Ctrl+A all · ↑↓ history · Esc cancel",
+                    ),
+                ]),
+            },
             Mode::Scroll => Line::from(vec![
                 Span::raw(" SCROLL ").black().on_magenta(),
                 hint(&format!(
@@ -1205,11 +1305,7 @@ impl App {
             ]),
             Mode::Normal | Mode::Help => {
                 let mut spans = vec![Span::raw(format!(" {} ", pane.name())).black().on_green()];
-                if let Some((text, at)) = &self.message
-                    && at.elapsed() < Duration::from_secs(4)
-                {
-                    spans.push(Span::raw(format!(" {text}")).yellow());
-                }
+                spans.extend(self.flash_span());
                 let title = pane.title().unwrap_or_else(|| {
                     std::iter::once(pane.harness.command.as_str())
                         .chain(pane.harness.args.iter().map(String::as_str))
@@ -1318,9 +1414,7 @@ impl App {
             Line::from("  [ / PgUp     scroll back  (also Shift+PgUp, mouse wheel)"),
             Line::from("  r            restart this harness"),
             Line::from("  x            cancel prompts queued for this harness"),
-            Line::from(
-                "  r (summary)  summarize the latest answers now (also Ctrl+R in the summary tab)",
-            ),
+            Line::from("  r (main)  capture the latest answers now (also Ctrl+R in the main tab)"),
             Line::from("  q            quit (stops all harnesses)"),
             Line::from("  Ctrl+\\       send a literal Ctrl+\\ to the harness"),
             Line::from(""),
@@ -1334,10 +1428,16 @@ impl App {
             Line::from(
                 "Tab markers: ● output · ⚑ trust the folder · ⧗ prompt queued · ? waiting for your answer · ✗ exited",
             ),
-            Line::from("Summary tab: a prompt sent to 2+ harnesses is compared once all go quiet."),
             Line::from(
-                "Type in the summary tab's prompt box and press Enter to send to all harnesses.",
+                "Main tab: each harness's answer to a prompt sent to 2+ harnesses, once it's done.",
             ),
+            Line::from(
+                "Type in the main tab's prompt box and press Enter to send to all harnesses.",
+            ),
+            Line::from(
+                "A prompt with ::send, ::wait-model-files, ::wait-file or ::wait-done lines runs as a script;",
+            ),
+            Line::from("in the main tab Ctrl+S skips the wait it is on and Ctrl+X cancels it."),
             Line::from("A prompt waits in the queue while its harness is starting or shows a"),
             Line::from("dialog such as a folder-trust prompt, and is sent once it's at its input."),
             Line::from(""),
@@ -1358,8 +1458,9 @@ impl App {
         );
     }
 
-    fn start_round(&mut self, text: &str, targets: &[usize]) {
-        if let Some(last) = self.rounds.last()
+    fn start_round(&mut self, text: &str, targets: &[usize], supersede: bool) {
+        if supersede
+            && let Some(last) = self.rounds.last()
             && last.state() == SummaryState::Waiting
         {
             last.set_state(SummaryState::Superseded);
@@ -1381,6 +1482,14 @@ impl App {
     fn mark_delivered(&mut self, pane: usize) {
         let mark = self.panes[pane].history_mark();
         let model_id = self.model_id(pane);
+        let earlier = self.rounds.len().saturating_sub(1);
+        for round in &mut self.rounds[..earlier] {
+            if let Some(slot) = round.slot(pane)
+                && round.delivered[slot].is_some()
+            {
+                round.followed_up[slot] = true;
+            }
+        }
         let Some(round) = self.rounds.last_mut() else {
             return;
         };
@@ -1405,7 +1514,7 @@ impl App {
         let (path, sent) = round.outputs[slot].as_ref()?;
         let meta = std::fs::metadata(path).ok()?;
         let modified = meta.modified().ok()?;
-        (meta.len() > 0 && modified >= *sent).then_some(modified)
+        (meta.len() > 0 && written_since(modified, *sent)).then_some(modified)
     }
 
     /// Whether the harness has finished its report: None if the prompt names
@@ -1499,10 +1608,237 @@ impl App {
         harness.model_label(detected)
     }
 
-    pub fn tick_summary(&mut self) -> bool {
-        let Some(index) = self.rounds.len().checked_sub(1) else {
-            return false;
+    fn start_run(&mut self, steps: Vec<Step>) {
+        let n = steps.len();
+        self.run = Some(Run {
+            steps,
+            states: vec![StepState::Pending; n],
+            cancelled: false,
+            last_send: None,
+            started: (Instant::now(), SystemTime::now()),
+            detail: String::new(),
+            seen: false,
+        });
+        self.flash(format!("script started: {n} steps"));
+        self.tick_run();
+    }
+
+    fn cancel_run(&mut self) {
+        let on_main = self.on_summary();
+        match self.run.as_mut() {
+            Some(run) if run.running() => {
+                run.cancelled = true;
+                run.seen = on_main;
+                self.flash("script cancelled; prompts already sent keep running");
+            }
+            _ => self.flash("no script is running"),
+        }
+    }
+
+    fn skip_wait(&mut self) {
+        let Some(run) = self.run.as_mut().filter(|r| r.running()) else {
+            self.flash("no script is running");
+            return;
         };
+        let Some(i) = run.current() else { return };
+        if matches!(run.steps[i].command, Command::Send { .. }) {
+            return;
+        }
+        run.states[i] = StepState::Skipped;
+        let line = run.steps[i].line.clone();
+        self.flash(format!("skipped {line}"));
+        self.tick_run();
+    }
+
+    /// The harnesses a script's targets mean now: `all` is every harness
+    /// that is not disabled.
+    fn resolve(&self, targets: &Targets) -> Vec<usize> {
+        match targets {
+            Targets::All => (0..self.panes.len())
+                .filter(|&i| self.panes[i].status() != Status::Stopped)
+                .collect(),
+            Targets::Named(names) => names
+                .iter()
+                .filter_map(|n| self.panes.iter().position(|p| p.name() == n))
+                .collect(),
+        }
+    }
+
+    /// Whether a harness is done with what it was sent at `since`, by the
+    /// same rules as a round: quiet, not asking, not working in the background.
+    fn pane_done(&self, pane: usize, since: Instant) -> bool {
+        let quiet = Duration::from_secs(self.config.summary.quiet_secs);
+        match self.panes[pane].status() {
+            Status::Running => {
+                !self.has_pending(pane)
+                    && since.elapsed() >= quiet
+                    && !self.panes[pane].is_busy(quiet)
+                    && !self.needs_input(pane)
+                    && !self.still_working(pane)
+            }
+            _ => true,
+        }
+    }
+
+    /// Whether `path` was written after `since` and has not changed for
+    /// `quiet_secs`.
+    fn file_settled(&self, path: &std::path::Path, since: SystemTime) -> bool {
+        let quiet = Duration::from_secs(self.config.summary.quiet_secs);
+        std::fs::metadata(self.cwd.join(path)).is_ok_and(|meta| {
+            meta.len() > 0
+                && meta.modified().is_ok_and(|m| {
+                    written_since(m, since) && m.elapsed().is_ok_and(|age| age >= quiet)
+                })
+        })
+    }
+
+    /// Advances the script: sends, and checks the current wait. Returns
+    /// whether anything changed.
+    pub fn tick_run(&mut self) -> bool {
+        let mut changed = false;
+        loop {
+            let Some(run) = self.run.as_ref().filter(|r| r.running()) else {
+                return changed;
+            };
+            let i = run.current().expect("a running script has a current step");
+            let step = run.steps[i].clone();
+            let last_send = run.last_send.clone();
+            let started = run.started;
+            let waiting_for = |targets: &Option<Targets>| -> (Vec<usize>, Instant, SystemTime) {
+                let (sent, at, time) =
+                    last_send
+                        .clone()
+                        .unwrap_or((Vec::new(), started.0, started.1));
+                match targets {
+                    Some(targets) => (self.resolve(targets), at, time),
+                    None => (sent, at, time),
+                }
+            };
+            let (done, detail) = match &step.command {
+                Command::Send { targets, text } => {
+                    let panes = self.resolve(targets);
+                    if panes.is_empty() {
+                        let on_main = self.on_summary();
+                        if let Some(run) = self.run.as_mut() {
+                            run.cancelled = true;
+                            run.seen = on_main;
+                        }
+                        self.flash_error(format!(
+                            "script stopped: {} has no harness to send to",
+                            step.line
+                        ));
+                        return true;
+                    }
+                    // Before sending: a quick harness may write its file at once.
+                    let sent = (Instant::now(), SystemTime::now());
+                    self.submit_prompt(text, &panes, true);
+                    if let Some(run) = self.run.as_mut() {
+                        run.last_send = Some((panes, sent.0, sent.1));
+                    }
+                    (true, String::new())
+                }
+                Command::WaitModelFiles { targets, .. } => {
+                    let (panes, at, time) = waiting_for(targets);
+                    let missing: Vec<String> = panes
+                        .iter()
+                        .filter(|&&p| match step.command.path(self.model_id(p).as_deref()) {
+                            Some(path) => !self.file_settled(std::path::Path::new(&path), time),
+                            // No MODEL_ID to name its file: wait until it is done.
+                            None => !self.pane_done(p, at),
+                        })
+                        .map(|&p| self.panes[p].name().to_string())
+                        .collect();
+                    let detail = format!(
+                        "{}/{} written; waiting for {}",
+                        panes.len() - missing.len(),
+                        panes.len(),
+                        missing.join(", ")
+                    );
+                    (missing.is_empty(), detail)
+                }
+                Command::WaitFile { .. } => {
+                    let time = last_send.as_ref().map_or(started.1, |s| s.2);
+                    let path = step.command.path(None).unwrap_or_default();
+                    let done = self.file_settled(std::path::Path::new(&path), time);
+                    (done, format!("waiting for {path}"))
+                }
+                Command::WaitDone { targets } => {
+                    let (panes, at, _) = waiting_for(targets);
+                    let busy: Vec<String> = panes
+                        .iter()
+                        .filter(|&&p| !self.pane_done(p, at))
+                        .map(|&p| self.panes[p].name().to_string())
+                        .collect();
+                    (busy.is_empty(), format!("waiting for {}", busy.join(", ")))
+                }
+            };
+            let on_main = self.on_summary();
+            let run = self.run.as_mut().expect("checked above");
+            if !done {
+                if run.states[i] != StepState::Active || run.detail != detail {
+                    run.states[i] = StepState::Active;
+                    run.detail = detail;
+                    changed = true;
+                }
+                return changed;
+            }
+            run.states[i] = StepState::Done;
+            run.detail.clear();
+            changed = true;
+            if run.current().is_none() {
+                run.seen = on_main;
+                self.flash("script finished");
+                return true;
+            }
+        }
+    }
+
+    /// The script's steps, shown above the rounds in the summary tab.
+    fn run_lines(&self) -> Vec<Line<'static>> {
+        let Some(run) = &self.run else {
+            return Vec::new();
+        };
+        let (title, hint) = if run.cancelled {
+            ("Script cancelled".to_string(), "")
+        } else if run.running() {
+            (
+                "Script".to_string(),
+                "   Ctrl+S skip a wait · Ctrl+X cancel",
+            )
+        } else {
+            ("Script finished".to_string(), "")
+        };
+        let mut lines = vec![Line::from(vec![
+            Span::raw(title).bold(),
+            Span::raw(hint).dark_gray(),
+        ])];
+        for (step, state) in run.steps.iter().zip(&run.states) {
+            let (marker, style) = match state {
+                StepState::Done => ("✓", Style::default()),
+                StepState::Skipped => ("⤼", Style::default().dark_gray()),
+                StepState::Active if run.cancelled => ("✗", Style::default().red()),
+                StepState::Active => ("●", Style::default().green()),
+                StepState::Pending => (" ", Style::default().dark_gray()),
+            };
+            let mut spans = vec![Span::styled(format!("  {marker} {}", step.line), style)];
+            if *state == StepState::Active && !run.cancelled && !run.detail.is_empty() {
+                spans.push(Span::raw(format!("  — {}", run.detail)).dark_gray());
+            }
+            lines.push(Line::from(spans));
+        }
+        lines.push(Line::from(""));
+        lines
+    }
+
+    pub fn tick_summary(&mut self) -> bool {
+        let mut changed = false;
+        for index in 0..self.rounds.len() {
+            changed |= self.tick_round(index);
+        }
+        changed
+    }
+
+    fn tick_round(&mut self, index: usize) -> bool {
         let state = self.rounds[index].state();
         if state == SummaryState::Superseded {
             return false;
@@ -1523,12 +1859,16 @@ impl App {
             let running = matches!(self.panes[pane].status(), Status::Running);
             let capture = match self.rounds[index].delivered[slot] {
                 Some((at, mark)) => {
+                    let report = Self::report_ready(&self.rounds[index], slot, quiet);
                     let quiet_now = at.elapsed() >= quiet
                         && !self.panes[pane].is_busy(quiet)
                         && !self.needs_input(pane)
                         && !self.still_working(pane)
-                        && Self::report_ready(&self.rounds[index], slot, quiet) != Some(false);
-                    if !running || quiet_now {
+                        && report != Some(false);
+                    // A harness sent another prompt (a script's next step) is
+                    // busy with that; its finished report is this round's answer.
+                    let moved_on = self.rounds[index].followed_up[slot] && report == Some(true);
+                    if !running || quiet_now || moved_on {
                         Some(self.capture_slot(index, slot, mark, true))
                     } else if timed_out && existing.is_none() {
                         Some(self.capture_slot(index, slot, mark, false))
@@ -1547,7 +1887,14 @@ impl App {
                 changed = true;
             }
         }
-        if !self.config.summary.auto || !self.rounds[index].all_captured() {
+        if changed && self.rounds[index].all_finished() && !self.on_summary() {
+            self.summary_unseen = true;
+        }
+        if !self.config.summary.compare
+            || !self.config.summary.auto
+            || !self.rounds[index].all_captured()
+            || self.rounds[index].targets.len() < 2
+        {
             return changed;
         }
         let rerun = self.rounds[index].compared_unfinished && self.rounds[index].all_finished();
@@ -1710,8 +2057,18 @@ impl App {
             self.view_round(0);
         }
         let index = self.summary_view.min(self.rounds.len() - 1);
+        if !self.config.summary.compare {
+            // Without a comparison, Ctrl+R takes every answer as it is now.
+            for slot in 0..self.rounds[index].targets.len() {
+                if self.rounds[index].delivered[slot].is_some() {
+                    self.refresh_section(slot);
+                }
+            }
+            self.flash("captured every answer as it is now");
+            return;
+        }
         if matches!(self.rounds[index].state(), SummaryState::Running { .. }) {
-            self.flash("summary already running");
+            self.flash("comparison already running");
             return;
         }
         self.summary_scroll = 0;
@@ -1727,6 +2084,8 @@ impl App {
             KeyCode::Char('r') if ctrl => self.regenerate_summary(),
             KeyCode::Char('p') if ctrl => self.view_round(self.summary_view.saturating_sub(1)),
             KeyCode::Char('n') if ctrl => self.view_round((self.summary_view + 1).min(last)),
+            KeyCode::Char('x') if ctrl => self.cancel_run(),
+            KeyCode::Char('s') if ctrl => self.skip_wait(),
             KeyCode::Char('l') if ctrl && sections > 0 => {
                 self.refresh_section(self.summary_focus.min(sections - 1));
             }
@@ -1760,8 +2119,11 @@ impl App {
                 ComposerAction::None => {}
                 ComposerAction::Cancel => self.summary_input.clear(),
                 ComposerAction::Submit { text, targets } => {
-                    self.submit_prompt(&text, &targets);
-                    self.summary_scroll = 0;
+                    if self.submit(&text, &targets) {
+                        self.summary_scroll = 0;
+                    } else {
+                        self.summary_input.insert_str(&text);
+                    }
                 }
             },
         }
@@ -1770,7 +2132,7 @@ impl App {
     fn summary_sections(&self) -> usize {
         self.rounds
             .get(self.summary_view)
-            .map(|r| r.targets.len() + 1)
+            .map(|r| r.targets.len() + usize::from(self.config.summary.compare))
             .unwrap_or(0)
     }
 
@@ -1779,8 +2141,12 @@ impl App {
             self.summary_view = index;
             self.summary_scroll = 0;
             self.summary_focus = 0;
-            let agents = self.summary_sections().saturating_sub(1);
-            self.summary_folded = std::iter::repeat_n(true, agents).chain([false]).collect();
+            // Answers start folded; the comparison, last, unfolded.
+            let compare = self.config.summary.compare;
+            let agents = self.summary_sections().saturating_sub(usize::from(compare));
+            self.summary_folded = std::iter::repeat_n(true, agents)
+                .chain(compare.then_some(false))
+                .collect();
             if self.summary_sections() == 0 {
                 self.summary_folded.clear();
             }
@@ -1795,14 +2161,46 @@ impl App {
     }
 
     fn summary_tab_label(&self) -> (String, Style) {
+        let compare = self.config.summary.compare;
+        // A script's state comes first: ▶ sending or waiting for harnesses,
+        // ⏸ waiting for files, then ✓ or ✗ until the tab is looked at.
+        let script = self.run.as_ref().and_then(|run| {
+            if run.running() {
+                let files = run.current().is_some_and(|i| {
+                    matches!(
+                        run.steps[i].command,
+                        Command::WaitModelFiles { .. } | Command::WaitFile { .. }
+                    )
+                });
+                Some(if files {
+                    ('⏸', Color::Yellow)
+                } else {
+                    ('▶', Color::Green)
+                })
+            } else if !run.seen {
+                Some(if run.cancelled {
+                    ('✗', Color::Red)
+                } else {
+                    ('✓', Color::Green)
+                })
+            } else {
+                None
+            }
+        });
         let (marker, color) = match self.rounds.last().map(Round::state) {
+            _ if script.is_some() => script.expect("checked"),
+            _ if !compare => match self.rounds.last() {
+                Some(round) if !round.all_finished() => ('⧗', Color::Yellow),
+                Some(_) if self.summary_unseen => ('●', Color::Green),
+                _ => (' ', Color::Reset),
+            },
             Some(SummaryState::Waiting) => ('⧗', Color::Yellow),
             Some(SummaryState::Running { .. }) => ('…', Color::Cyan),
             Some(SummaryState::Done { .. }) if self.summary_unseen => ('●', Color::Green),
             Some(SummaryState::Failed(_)) => ('!', Color::Red),
             _ => (' ', Color::Reset),
         };
-        let text = format!("{marker}summary");
+        let text = format!("{marker}main");
         let mut style = Style::default().fg(color);
         if self.on_summary() {
             style = style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
@@ -1889,6 +2287,13 @@ impl App {
     }
 
     fn summary_lines(&self) -> Vec<(Line<'static>, Option<usize>)> {
+        let mut lines: Vec<(Line<'static>, Option<usize>)> =
+            self.run_lines().into_iter().map(|l| (l, None)).collect();
+        lines.extend(self.round_lines());
+        lines
+    }
+
+    fn round_lines(&self) -> Vec<(Line<'static>, Option<usize>)> {
         let plain = |lines: Vec<Line<'static>>| lines.into_iter().map(|l| (l, None)).collect();
         let Some(round) = self.rounds.get(self.summary_view) else {
             return plain(vec![
@@ -1897,13 +2302,21 @@ impl App {
                 Line::from(
                     "Type a prompt in the box below and press Enter to send it to every harness.",
                 ),
-                Line::from(format!(
-                    "Each harness's own answer appears here as soon as it's done, and all answers are compared by `{}` once every harness has been quiet for {}s.",
-                    self.config.summary.command_line(),
-                    self.config.summary.quiet_secs
-                )),
+                Line::from(if self.config.summary.compare {
+                    format!(
+                        "Each harness's own answer appears here as soon as it's done, and all answers are compared by `{}` once every harness has been quiet for {}s.",
+                        self.config.summary.command_line(),
+                        self.config.summary.quiet_secs
+                    )
+                } else {
+                    "Each harness's own answer appears here as soon as it's done.".to_string()
+                }),
                 Line::from(""),
-                Line::from("Press Ctrl+R to compare what the harnesses show right now."),
+                Line::from(if self.config.summary.compare {
+                    "Press Ctrl+R to compare what the harnesses show right now."
+                } else {
+                    "Press Ctrl+R to capture what the harnesses show right now."
+                }),
             ]);
         };
         let mut lines: Vec<(Line<'static>, Option<usize>)> = plain(vec![
@@ -1967,9 +2380,16 @@ impl App {
             lines.push((Line::from(""), None));
         }
 
+        if !self.config.summary.compare {
+            return lines;
+        }
         let overall = round.targets.len();
         let state = round.state();
         let status = match &state {
+            SummaryState::Waiting if round.targets.len() < 2 => (
+                "one harness, nothing to compare (Ctrl+R compares anyway)".to_string(),
+                Color::DarkGray,
+            ),
             SummaryState::Waiting if round.all_captured() && !self.config.summary.auto => (
                 "all answers captured, press Ctrl+R to compare".to_string(),
                 Color::Cyan,
@@ -2202,7 +2622,9 @@ impl App {
         let index = self.summary_view.min(index);
         let round = &self.rounds[index];
         if section >= round.targets.len() {
-            self.regenerate_summary();
+            if self.config.summary.compare {
+                self.regenerate_summary();
+            }
             return;
         }
         let pane = round.targets[section];
@@ -2217,7 +2639,8 @@ impl App {
         self.rounds[index].reopened[section] = before;
         self.store_capture(index, section, capture);
         let round = &self.rounds[index];
-        let rerun = round.compared_unfinished
+        let rerun = self.config.summary.compare
+            && round.compared_unfinished
             && round.all_finished()
             && matches!(
                 round.state(),
@@ -2255,6 +2678,7 @@ mod tests {
 
     fn test_summary() -> crate::summary::SummaryConfig {
         crate::summary::SummaryConfig {
+            compare: true,
             command: "sh".into(),
             args: vec![
                 "-c".into(),
@@ -2734,7 +3158,7 @@ mod tests {
         assert_eq!(quiet.width(), "quiet".width() + 1);
         assert_eq!(busy.width(), "busy".width() + 1);
         let summary = app.summary_tab_label().0;
-        assert_eq!(summary, " summary");
+        assert_eq!(summary, " main");
         compose_all(&mut app, "q");
         assert_eq!(app.summary_tab_label().0.width(), summary.width());
     }
@@ -2901,6 +3325,12 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("review-Rev-Model.md");
         std::fs::write(&file, "verdict: stale report from an older run\n").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(3600))
+            .unwrap();
         let report =
             "---\nverdict: approve\n---\n## Findings\n### Rev-Model-F1\n- severity: minor\n";
         let script = format!(
@@ -2950,6 +3380,224 @@ mod tests {
             app.rounds[0].headline(0).unwrap(),
             "approve · 1 finding (1 minor)"
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn tick_until(app: &mut App, what: &str, mut done: impl FnMut(&App) -> bool) {
+        let start = Instant::now();
+        while !done(app) {
+            assert!(
+                start.elapsed() < Duration::from_secs(15),
+                "timed out waiting for {what}:\n{}",
+                summary_text(app)
+            );
+            app.deliver_pending();
+            app.tick_run();
+            app.tick_summary();
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    fn submit_in_summary(app: &mut App, text: &str) {
+        app.select(app.summary_tab());
+        app.handle_event(Event::Paste(text.into()));
+        app.handle_event(key(KeyCode::Enter, KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn script_sends_waits_for_model_files_then_sends_on() {
+        let dir = std::env::temp_dir().join(format!("agent-tabs-script-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let writer = |name: &str, model: &str, delay: &str| {
+            let file = dir.join(format!("r-{}.md", model.replace(' ', "-")));
+            let mut h = script_harness(
+                name,
+                &format!(
+                    "printf '\\033[?2004h'; read l; sleep {delay}; printf 'report\\n' > '{}'; sleep 30",
+                    file.display()
+                ),
+            );
+            h.model = Some(model.into());
+            h
+        };
+        let mut app = app_with(vec![
+            writer("a", "A M", "0.3"),
+            writer("b", "B M", "1.5"),
+            cat_harness("c"),
+        ]);
+        thread::sleep(Duration::from_millis(200));
+        let script = format!(
+            "DIR={}\n::# reviews\n::send a b\nOUT=$DIR/r-$MODEL_ID.md\nwrite a report\n\n::wait-model-files $OUT\n\n::send c\nmerge them\n::wait-done",
+            dir.display()
+        );
+        submit_in_summary(&mut app, &script);
+        assert_eq!(
+            app.summary_input.text(),
+            "",
+            "a valid script leaves the box"
+        );
+        let text = summary_text(&app);
+        assert!(text.contains("✓ ::send a b"), "{text}");
+        assert!(text.contains("● ::wait-model-files $OUT"), "{text}");
+        assert!(text.contains("0/2 written; waiting for a, b"), "{text}");
+
+        tick_until(&mut app, "a's report", |a| {
+            summary_text(a).contains("1/2 written; waiting for b")
+        });
+        assert!(
+            !screen(app.pane(2)).contains("merge them"),
+            "c waits for both files"
+        );
+        tick_until(&mut app, "the send to c", |a| {
+            screen(a.pane(2)).contains("got:merge them")
+        });
+        let sent = app.pane(2).text_since(0, 50);
+        assert!(
+            sent.contains(&format!("got:DIR={}", dir.display())),
+            "{sent}"
+        );
+        assert!(
+            !sent.contains("OUT="),
+            "only the header and c's own text: {sent}"
+        );
+        tick_until(&mut app, "the end", |a| !a.run.as_ref().unwrap().running());
+        assert!(summary_text(&app).contains("Script finished"));
+        assert_eq!(
+            app.rounds.len(),
+            2,
+            "one round per ::send, even for one harness"
+        );
+        assert_ne!(app.rounds[0].state(), SummaryState::Superseded);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn script_waits_can_be_skipped_and_scripts_cancelled() {
+        let mut app = app_with(vec![cat_harness("a"), cat_harness("b")]);
+        thread::sleep(Duration::from_millis(200));
+        submit_in_summary(
+            &mut app,
+            "::send a\nhello\n::wait-file /nonexistent/never.md\n::send b\nafter the wait\n::wait-file /nonexistent/again.md",
+        );
+        assert!(summary_text(&app).contains("● ::wait-file /nonexistent/never.md"));
+        app.handle_event(key(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert!(summary_text(&app).contains("⤼ ::wait-file /nonexistent/never.md"));
+        tick_until(&mut app, "the second send", |a| {
+            screen(a.pane(1)).contains("got:after the wait")
+        });
+        app.handle_event(key(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        let text = summary_text(&app);
+        assert!(text.contains("Script cancelled"), "{text}");
+        assert!(
+            text.contains("✗ ::wait-file /nonexistent/again.md"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn main_tab_marker_follows_the_script() {
+        use unicode_width::UnicodeWidthStr;
+        let mut app = app_with(vec![cat_harness("a"), cat_harness("b")]);
+        thread::sleep(Duration::from_millis(200));
+        submit_in_summary(
+            &mut app,
+            "::send a\nhello\n::wait-file /nonexistent/x.md\n::send b\nhi\n::wait-done",
+        );
+        assert_eq!(app.summary_tab_label().0, "⏸main", "waiting for a file");
+        app.select(0);
+        app.skip_wait();
+        assert_eq!(
+            app.summary_tab_label().0,
+            "▶main",
+            "waiting for b to finish"
+        );
+        tick_until(&mut app, "the end", |a| !a.run.as_ref().unwrap().running());
+        assert_eq!(
+            app.summary_tab_label().0,
+            "✓main",
+            "finished, not looked at"
+        );
+        app.select(app.summary_tab());
+        assert_ne!(app.summary_tab_label().0, "✓main", "looked at");
+        for marker in ['▶', '⏸', '✓', '✗'] {
+            assert_eq!(
+                format!("{marker}main").width(),
+                "main".width() + 1,
+                "{marker}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_script_with_a_mistake_is_not_sent_and_stays_in_the_box() {
+        let mut app = app_with(vec![cat_harness("a"), cat_harness("b")]);
+        thread::sleep(Duration::from_millis(200));
+        let script = "TARGET=PS-1\n::send all\nREVIEW_DIR=/r/$TARGET";
+        submit_in_summary(&mut app, script);
+        assert_eq!(app.summary_input.text(), script);
+        assert!(app.run.is_none() && app.rounds.is_empty());
+        let message = &app.message.as_ref().unwrap().0;
+        assert!(
+            message.contains("line 2: ::send all sends only variables"),
+            "{message}"
+        );
+        thread::sleep(Duration::from_millis(300));
+        assert!(!screen(app.pane(0)).contains("got:"));
+    }
+
+    #[test]
+    fn without_compare_there_is_no_comparison() {
+        let mut app = app_with(vec![replying_harness("a"), replying_harness("b")]);
+        app.config.summary.compare = false;
+        thread::sleep(Duration::from_millis(200));
+        compose_all(&mut app, "hello there");
+        assert_eq!(app.summary_tab_label().0, "⧗main");
+        tick_until(&mut app, "both answers", |a| a.rounds[0].all_finished());
+        assert_eq!(
+            app.summary_tab_label().0,
+            "●main",
+            "new answers not seen yet"
+        );
+        app.select(app.summary_tab());
+        let text = summary_text(&app);
+        assert!(!text.contains("⟳ comparison"), "{text}");
+        assert_eq!(
+            app.rounds[0].state(),
+            SummaryState::Waiting,
+            "no summarizer ran"
+        );
+        assert_eq!(app.summary_sections(), 2);
+        app.handle_event(key(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert!(app.rounds[0].all_finished());
+        assert_eq!(app.rounds[0].state(), SummaryState::Waiting);
+    }
+
+    #[test]
+    fn report_is_taken_when_its_harness_moved_on_to_the_next_prompt() {
+        let dir = std::env::temp_dir().join(format!("agent-tabs-moved-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("combined.md");
+        // Writes its report, then keeps printing as if working on more.
+        let script = format!(
+            "printf '\\033[?2004h'; read l; printf 'verdict: approve\\n' > '{}'; while true; do printf 'working\\r\\n'; sleep 0.2; done",
+            file.display()
+        );
+        let mut app = app_with(vec![script_harness("opus", &script), cat_harness("b")]);
+        thread::sleep(Duration::from_millis(200));
+        submit_in_summary(
+            &mut app,
+            &format!(
+                "::send opus\nREVIEW_COMBINED={}/combined.md\nmerge\n::wait-file $REVIEW_COMBINED\n::send opus\nfix it",
+                dir.display()
+            ),
+        );
+        tick_until(&mut app, "the second send", |a| a.rounds.len() == 2);
+        tick_until(&mut app, "the merge round's report", |a| {
+            a.rounds[0].captures[0].is_some()
+        });
+        let capture = app.rounds[0].captures[0].as_ref().unwrap();
+        assert!(capture.finished && capture.report.is_some());
+        assert_eq!(app.rounds[0].answer(0).unwrap(), "verdict: approve");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -3215,7 +3863,7 @@ mod tests {
         app.handle_event(key(KeyCode::Char('\\'), KeyModifiers::CONTROL));
         assert_eq!(app.mode(), Mode::Prefix);
         app.handle_event(key(KeyCode::Char('3'), KeyModifiers::NONE));
-        assert_eq!(app.active(), 1, "tab 1 is the summary, tab 3 is harness b");
+        assert_eq!(app.active(), 1, "tab 1 is the main tab, tab 3 is harness b");
         app.handle_event(key(KeyCode::Char('4'), KeyModifiers::CONTROL));
         app.handle_event(key(KeyCode::Char('n'), KeyModifiers::NONE));
         assert_eq!(app.active(), 2);
@@ -3223,7 +3871,7 @@ mod tests {
         app.handle_event(key(KeyCode::Char('n'), KeyModifiers::NONE));
         assert!(
             app.on_summary(),
-            "next after the last harness wraps to the summary"
+            "next after the last harness wraps to the main tab"
         );
         app.handle_event(key(KeyCode::Char('\\'), KeyModifiers::CONTROL));
         app.handle_event(key(KeyCode::Char('n'), KeyModifiers::NONE));
@@ -3283,7 +3931,7 @@ mod tests {
     fn summary_is_the_first_tab_and_the_starting_one() {
         let mut app = app(&["a", "b"]);
         let rows = buffer_rows(&draw_app(&mut app, 80, 10));
-        let summary = rows[0].find("summary").unwrap();
+        let summary = rows[0].find("main").unwrap();
         assert!(summary < rows[0].find('a').unwrap(), "{:?}", rows[0]);
         click(&mut app, summary as u16 + 1, 0);
         assert!(app.on_summary());

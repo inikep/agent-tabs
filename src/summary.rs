@@ -14,6 +14,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct SummaryConfig {
+    /// Whether to compare the answers of a round with `command`, shown as a
+    /// last "comparison" section.
+    pub compare: bool,
     pub command: String,
     pub args: Vec<String>,
     pub auto: bool,
@@ -32,6 +35,7 @@ pub struct SummaryConfig {
 impl Default for SummaryConfig {
     fn default() -> Self {
         Self {
+            compare: false,
             command: "claude".into(),
             args: vec!["--print".into()],
             auto: true,
@@ -199,18 +203,37 @@ impl Round {
 /// the lines before it and from `model_id` as `MODEL_ID`. None if no such
 /// line exists or it uses a variable that is not defined.
 pub fn output_file(prompt: &str, vars: &[String], model_id: Option<&str>) -> Option<PathBuf> {
+    let values = variables(prompt, model_id);
+    vars.iter()
+        .find_map(|var| values.get(var))
+        .cloned()
+        .flatten()
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
+/// The `NAME` and value of a `NAME=value` line.
+pub fn assignment(line: &str) -> Option<(&str, &str)> {
     static ASSIGNMENT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$").expect("valid regex")
     });
+    let caps = ASSIGNMENT.captures(line)?;
+    Some((caps.get(1)?.as_str(), caps.get(2)?.as_str()))
+}
+
+/// The variables a prompt's `NAME=value` lines define, each expanded from the
+/// lines before it and from `model_id` as `MODEL_ID`; None for a value that
+/// uses an undefined variable.
+pub fn variables(prompt: &str, model_id: Option<&str>) -> HashMap<String, Option<String>> {
     let mut values: HashMap<String, Option<String>> = HashMap::new();
     if let Some(model_id) = model_id {
         values.insert("MODEL_ID".into(), Some(model_id.to_string()));
     }
     for line in prompt.lines() {
-        let Some(caps) = ASSIGNMENT.captures(line) else {
+        let Some((name, value)) = assignment(line) else {
             continue;
         };
-        let mut value = caps[2].trim();
+        let mut value = value.trim();
         if let Some((before, _)) = value.split_once(" #") {
             value = before.trim_end();
         }
@@ -220,17 +243,13 @@ pub fn output_file(prompt: &str, vars: &[String], model_id: Option<&str>) -> Opt
             .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
             .unwrap_or(value);
         let expanded = expand_vars(value, &values);
-        values.insert(caps[1].to_string(), expanded);
+        values.insert(name.to_string(), expanded);
     }
-    vars.iter()
-        .find_map(|var| values.get(var))
-        .cloned()
-        .flatten()
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
+    values
 }
 
-fn expand_vars(value: &str, values: &HashMap<String, Option<String>>) -> Option<String> {
+/// `value` with `$NAME` and `${NAME}` replaced; None if one is undefined.
+pub fn expand_vars(value: &str, values: &HashMap<String, Option<String>>) -> Option<String> {
     static VAR: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
             .expect("valid regex")

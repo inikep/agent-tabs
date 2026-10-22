@@ -3,10 +3,15 @@ scrollback = 20000
 mouse = true
 
 [summary]
+# Compare each round's answers with `command` (off: a script's merge step
+# does that better).
+compare = false
 command = "claude"
 args = ["--print"]
 auto = true
 quiet_secs = 5
+# Variables that name the file a prompt asks each harness to write.
+output_vars = ["OUTPUT_FILE", "REVIEW_COMBINED"]
 
 [[harness]]
 name = "claude"

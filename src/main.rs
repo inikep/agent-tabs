@@ -5,6 +5,7 @@ mod config;
 mod keys;
 mod pane;
 mod render;
+mod script;
 mod summary;
 
 use std::io::{Write, stdout};
