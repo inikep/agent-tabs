@@ -99,7 +99,9 @@ enabled = false
 
 A composed prompt is sent to each target as a bracketed paste, so a multi-line
 prompt arrives as one message. After `submit_delay_ms` agent-tabs presses
-`Enter` for you.
+`Enter` for you. A prompt whose last word starts with `$` or `@` gets a
+trailing space: with the cursor in such a word, codex (and claude, for `@`)
+opens a popup that would take that `Enter`.
 
 The first prompt agent-tabs sends to each harness starts with a line naming
 its model, so the model doesn't have to guess what it is:

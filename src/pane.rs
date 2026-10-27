@@ -584,7 +584,7 @@ impl Pane {
 
     pub fn send_prompt(&self, text: &str, submit_delay: Duration) {
         self.scroll(Scroll::Bottom);
-        self.paste(text);
+        self.paste(&ending_outside_a_mention(text));
         let Some(writer) = self.writer.clone() else {
             return;
         };
@@ -705,6 +705,19 @@ struct Started {
     last_output: Arc<Mutex<Option<Instant>>>,
 }
 
+/// `text`, plus a space if its last word starts with `$` or `@`. With the
+/// cursor in such a word, codex shows a skill or file popup and its Enter
+/// picks from the popup instead of sending the prompt; claude's `@` file
+/// popup does the same.
+fn ending_outside_a_mention(text: &str) -> std::borrow::Cow<'_, str> {
+    let last_word = text.rsplit(char::is_whitespace).next().unwrap_or("");
+    if last_word.starts_with(['$', '@']) {
+        format!("{text} ").into()
+    } else {
+        text.into()
+    }
+}
+
 fn pty_size(size: Size) -> PtySize {
     PtySize {
         rows: size.rows.max(1),
@@ -794,6 +807,24 @@ mod tests {
             "stty raw -echo; printf 'ab\\033[6n'; dd bs=1 count=6 2>/dev/null | od -An -c | tr -d ' \\n'; printf '\\r\\n'; sleep 0.2",
         );
         wait_for(&pane, |p| screen_text(p).contains("[1;3R"));
+    }
+
+    #[test]
+    fn a_prompt_never_ends_inside_a_mention() {
+        assert_eq!(
+            ending_outside_a_mention("Read $PROMPT_DIR/review.md"),
+            "Read $PROMPT_DIR/review.md "
+        );
+        assert_eq!(
+            ending_outside_a_mention("look at\n@src/app.rs"),
+            "look at\n@src/app.rs "
+        );
+        assert_eq!(ending_outside_a_mention("cost: 5$"), "cost: 5$");
+        assert_eq!(
+            ending_outside_a_mention("Read $X.md\nthen stop"),
+            "Read $X.md\nthen stop"
+        );
+        assert_eq!(ending_outside_a_mention("$X "), "$X ");
     }
 
     #[test]
