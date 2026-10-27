@@ -7,6 +7,7 @@ mod pane;
 mod render;
 mod rounds;
 mod script;
+mod state;
 
 use std::io::{Write, stdout};
 use std::path::PathBuf;
@@ -63,6 +64,12 @@ struct Cli {
         help = "Start every harness in its approve-everything mode (claude/agy --dangerously-skip-permissions, codex --dangerously-bypass-approvals-and-sandbox, cursor-agent --yolo, opencode --auto)"
     )]
     yolo: bool,
+
+    #[arg(
+        long,
+        help = "Start without the rounds and script saved by the last run in this directory (they are still saved from now on)"
+    )]
+    no_restore: bool,
 }
 
 fn main() -> Result<()> {
@@ -82,6 +89,7 @@ fn main() -> Result<()> {
             .with_context(|| format!("working directory {}", dir.display()))?,
         None => std::env::current_dir()?,
     };
+    let state_path = state::path_for(&cwd);
 
     let mut terminal = ratatui::init();
     let keyboard_enhanced = supports_keyboard_enhancement().unwrap_or(false);
@@ -125,7 +133,11 @@ fn main() -> Result<()> {
             return Err(err);
         }
     };
+    if let Some(path) = state_path {
+        app.use_state_file(path, !cli.no_restore);
+    }
     let result = app.run(&mut terminal);
+    app.save_state();
     restore_terminal(keyboard_enhanced, mouse);
     app.shutdown();
     result

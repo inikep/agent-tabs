@@ -10,19 +10,21 @@
 //! Merge the reviews.
 //! ```
 
+use serde::{Deserialize, Serialize};
+
 use crate::rounds::{assignment, expand_vars, variables};
 
 const COMMANDS: [&str; 4] = ["send", "wait-model-files", "wait-file", "wait-done"];
 
 /// Who a command is for: `all` (every harness that is not disabled) or
 /// harnesses by name.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Targets {
     All,
     Named(Vec<String>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Command {
     /// Send `text` to the targets as one round.
     Send { targets: Targets, text: String },
@@ -40,7 +42,7 @@ pub enum Command {
     WaitDone { targets: Option<Targets> },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Step {
     /// The `::` line, as written.
     pub line: String,

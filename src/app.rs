@@ -58,6 +58,11 @@ pub struct App {
     /// (shown longer, in red).
     message: Option<(String, Instant, bool)>,
     run: Option<Run>,
+    /// Where rounds and the script are saved, whether that is due, and when
+    /// it last happened.
+    state_path: Option<PathBuf>,
+    state_dirty: bool,
+    last_save: Instant,
     pending: Vec<(usize, String)>,
     dialogs: regex::RegexSet,
     rounds: Vec<Round>,
@@ -102,8 +107,8 @@ enum Drag {
     Main { anchor: (usize, u16), moved: bool },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StepState {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum StepState {
     Pending,
     Active,
     Done,
@@ -122,6 +127,12 @@ struct Run {
     detail: String,
     /// Whether the main tab has been looked at since the script ended.
     seen: bool,
+    /// Harnesses the current wait has counted, and those it still waits for.
+    satisfied: Vec<usize>,
+    pending: Vec<usize>,
+    /// Set for a script restored after a restart: it waits for Ctrl+G, which
+    /// sends the interrupted step's prompt again to these harnesses.
+    interrupted: Option<Vec<usize>>,
 }
 
 impl Run {
@@ -427,6 +438,9 @@ impl App {
             exit_span: (0, 0),
             quit: false,
             run: None,
+            state_path: None,
+            state_dirty: false,
+            last_save: Instant::now(),
         };
         app.dialogs = app.config.dialog_regex()?;
         app.inputs = app.config.input_regex()?;
@@ -595,9 +609,14 @@ impl App {
             }
             if self.tick_run() {
                 redraw = true;
+                self.state_dirty = true;
             }
             if self.tick_rounds() {
                 redraw = true;
+                self.state_dirty = true;
+            }
+            if self.state_dirty && self.last_save.elapsed() >= Duration::from_secs(1) {
+                self.save_state();
             }
             if redraw || self.dirty.swap(false, Ordering::AcqRel) {
                 terminal.draw(|frame| self.draw(frame))?;
@@ -900,6 +919,7 @@ impl App {
         match crate::script::parse(text, &names) {
             Ok(None) => {
                 self.submit_prompt(text, targets, false);
+                self.state_dirty = true;
                 true
             }
             Ok(Some(_)) if self.run.as_ref().is_some_and(Run::running) => {
@@ -910,6 +930,7 @@ impl App {
             }
             Ok(Some(steps)) => {
                 self.start_run(steps);
+                self.state_dirty = true;
                 true
             }
             Err(err) => {
@@ -1438,6 +1459,9 @@ impl App {
                 "A prompt with ::send, ::wait-model-files, ::wait-file or ::wait-done lines runs as a script;",
             ),
             Line::from("in the main tab Ctrl+S skips the wait it is on and Ctrl+X cancels it."),
+            Line::from(
+                "Rounds and the script are saved; after a restart Ctrl+G resumes a paused script.",
+            ),
             Line::from("A prompt waits in the queue while its harness is starting or shows a"),
             Line::from("dialog such as a folder-trust prompt, and is sent once it's at its input."),
             Line::from(""),
@@ -1618,6 +1642,9 @@ impl App {
             started: (Instant::now(), SystemTime::now()),
             detail: String::new(),
             seen: false,
+            satisfied: Vec::new(),
+            pending: Vec::new(),
+            interrupted: None,
         });
         self.flash(format!("script started: {n} steps"));
         self.tick_run();
@@ -1629,6 +1656,7 @@ impl App {
             Some(run) if run.running() => {
                 run.cancelled = true;
                 run.seen = on_main;
+                self.state_dirty = true;
                 self.flash("script cancelled; prompts already sent keep running");
             }
             _ => self.flash("no script is running"),
@@ -1640,12 +1668,19 @@ impl App {
             self.flash("no script is running");
             return;
         };
+        if run.interrupted.is_some() {
+            self.flash("the script is paused; Ctrl+G resumes it");
+            return;
+        }
         let Some(i) = run.current() else { return };
         if matches!(run.steps[i].command, Command::Send { .. }) {
             return;
         }
         run.states[i] = StepState::Skipped;
+        run.satisfied.clear();
+        run.pending.clear();
         let line = run.steps[i].line.clone();
+        self.state_dirty = true;
         self.flash(format!("skipped {line}"));
         self.tick_run();
     }
@@ -1697,13 +1732,18 @@ impl App {
     pub fn tick_run(&mut self) -> bool {
         let mut changed = false;
         loop {
-            let Some(run) = self.run.as_ref().filter(|r| r.running()) else {
+            let Some(run) = self
+                .run
+                .as_ref()
+                .filter(|r| r.running() && r.interrupted.is_none())
+            else {
                 return changed;
             };
             let i = run.current().expect("a running script has a current step");
             let step = run.steps[i].clone();
             let last_send = run.last_send.clone();
             let started = run.started;
+            let already = run.satisfied.clone();
             let waiting_for = |targets: &Option<Targets>| -> (Vec<usize>, Instant, SystemTime) {
                 let (sent, at, time) =
                     last_send
@@ -1714,7 +1754,22 @@ impl App {
                     None => (sent, at, time),
                 }
             };
-            let (done, detail) = match &step.command {
+            // Splits the harnesses a wait is for into those it counts now
+            // (once counted, always counted) and those it still waits for.
+            let split =
+                |panes: &[usize], ready: &dyn Fn(usize) -> bool| -> (Vec<usize>, Vec<usize>) {
+                    panes
+                        .iter()
+                        .partition(|&&p| already.contains(&p) || ready(p))
+                };
+            let names = |panes: &[usize]| -> String {
+                panes
+                    .iter()
+                    .map(|&p| self.panes[p].name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let (done, satisfied, pending, detail) = match &step.command {
                 Command::Send { targets, text } => {
                     let panes = self.resolve(targets);
                     if panes.is_empty() {
@@ -1735,55 +1790,60 @@ impl App {
                     if let Some(run) = self.run.as_mut() {
                         run.last_send = Some((panes, sent.0, sent.1));
                     }
-                    (true, String::new())
+                    (true, Vec::new(), Vec::new(), String::new())
                 }
                 Command::WaitModelFiles { targets, .. } => {
                     let (panes, at, time) = waiting_for(targets);
-                    let missing: Vec<String> = panes
-                        .iter()
-                        .filter(|&&p| match step.command.path(self.model_id(p).as_deref()) {
-                            Some(path) => !self.file_settled(std::path::Path::new(&path), time),
+                    let (satisfied, pending) = split(&panes, &|p| {
+                        match step.command.path(self.model_id(p).as_deref()) {
+                            Some(path) => self.file_settled(std::path::Path::new(&path), time),
                             // No MODEL_ID to name its file: wait until it is done.
-                            None => !self.pane_done(p, at),
-                        })
-                        .map(|&p| self.panes[p].name().to_string())
-                        .collect();
+                            None => self.pane_done(p, at),
+                        }
+                    });
                     let detail = format!(
                         "{}/{} written; waiting for {}",
-                        panes.len() - missing.len(),
+                        satisfied.len(),
                         panes.len(),
-                        missing.join(", ")
+                        names(&pending)
                     );
-                    (missing.is_empty(), detail)
+                    (pending.is_empty(), satisfied, pending, detail)
                 }
                 Command::WaitFile { .. } => {
-                    let time = last_send.as_ref().map_or(started.1, |s| s.2);
+                    let (sent, _, time) = waiting_for(&None);
                     let path = step.command.path(None).unwrap_or_default();
                     let done = self.file_settled(std::path::Path::new(&path), time);
-                    (done, format!("waiting for {path}"))
+                    // Pending: the harnesses that were asked to write it.
+                    let pending = if done { Vec::new() } else { sent };
+                    (done, Vec::new(), pending, format!("waiting for {path}"))
                 }
                 Command::WaitDone { targets } => {
                     let (panes, at, _) = waiting_for(targets);
-                    let busy: Vec<String> = panes
-                        .iter()
-                        .filter(|&&p| !self.pane_done(p, at))
-                        .map(|&p| self.panes[p].name().to_string())
-                        .collect();
-                    (busy.is_empty(), format!("waiting for {}", busy.join(", ")))
+                    let (satisfied, pending) = split(&panes, &|p| self.pane_done(p, at));
+                    let detail = format!("waiting for {}", names(&pending));
+                    (pending.is_empty(), satisfied, pending, detail)
                 }
             };
             let on_main = self.on_main();
             let run = self.run.as_mut().expect("checked above");
             if !done {
-                if run.states[i] != StepState::Active || run.detail != detail {
+                if run.states[i] != StepState::Active
+                    || run.detail != detail
+                    || run.satisfied != satisfied
+                    || run.pending != pending
+                {
                     run.states[i] = StepState::Active;
                     run.detail = detail;
+                    run.satisfied = satisfied;
+                    run.pending = pending;
                     changed = true;
                 }
                 return changed;
             }
             run.states[i] = StepState::Done;
             run.detail.clear();
+            run.satisfied.clear();
+            run.pending.clear();
             changed = true;
             if run.current().is_none() {
                 run.seen = on_main;
@@ -1798,15 +1858,32 @@ impl App {
         let Some(run) = &self.run else {
             return Vec::new();
         };
+        let resend = run.interrupted.as_ref().map(|panes| {
+            panes
+                .iter()
+                .map(|&p| self.panes[p].name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        });
         let (title, hint) = if run.cancelled {
-            ("Script cancelled".to_string(), "")
+            ("Script cancelled".to_string(), String::new())
+        } else if let Some(resend) = resend {
+            let what = if resend.is_empty() {
+                "Ctrl+G resumes".to_string()
+            } else {
+                format!("Ctrl+G sends the current step's prompt again to {resend} and resumes")
+            };
+            (
+                "Script paused by a restart".to_string(),
+                format!("   {what} · Ctrl+X cancel"),
+            )
         } else if run.running() {
             (
                 "Script".to_string(),
-                "   Ctrl+S skip a wait · Ctrl+X cancel",
+                "   Ctrl+S skip a wait · Ctrl+X cancel".to_string(),
             )
         } else {
-            ("Script finished".to_string(), "")
+            ("Script finished".to_string(), String::new())
         };
         let mut lines = vec![Line::from(vec![
             Span::raw(title).bold(),
@@ -1828,6 +1905,255 @@ impl App {
         }
         lines.push(Line::from(""));
         lines
+    }
+
+    /// Resumes a script restored after a restart, sending the step it was on
+    /// again to the harnesses that had not finished it.
+    fn resume_run(&mut self) {
+        let Some(run) = self.run.as_mut().filter(|r| r.running()) else {
+            self.flash("no script is running");
+            return;
+        };
+        let Some(resend) = run.interrupted.take() else {
+            self.flash("the script is not paused");
+            return;
+        };
+        let current = run.current().unwrap_or(0);
+        let text = run.steps[..current]
+            .iter()
+            .rev()
+            .find_map(|s| match &s.command {
+                Command::Send { text, .. } => Some(text.clone()),
+                _ => None,
+            });
+        self.state_dirty = true;
+        if let Some(text) = text
+            && !resend.is_empty()
+        {
+            let sent = (Instant::now(), SystemTime::now());
+            self.submit_prompt(&text, &resend, true);
+            if let Some(run) = self.run.as_mut()
+                && let Some(last) = run.last_send.as_mut()
+            {
+                last.1 = sent.0;
+                last.2 = sent.1;
+            }
+        }
+        self.flash("script resumed");
+        self.tick_run();
+    }
+
+    /// Saves to `path` from now on, and first restores from it unless
+    /// `restore` is false.
+    pub fn use_state_file(&mut self, path: PathBuf, restore: bool) {
+        if restore {
+            match crate::state::load(&path) {
+                Ok(Some(saved)) => self.restore(saved),
+                Ok(None) => {}
+                Err(err) => self.flash_error(format!("not restored: {err:#}")),
+            }
+        }
+        self.state_path = Some(path);
+        self.state_dirty = true;
+    }
+
+    pub fn save_state(&mut self) {
+        self.state_dirty = false;
+        self.last_save = Instant::now();
+        let Some(path) = self.state_path.clone() else {
+            return;
+        };
+        let rounds = self.rounds.iter().map(|r| self.saved_round(r)).collect();
+        let run = self.run.as_ref().map(|r| self.saved_run(r));
+        if let Err(err) = crate::state::save(&path, rounds, run) {
+            self.flash_error(format!("could not save state: {err:#}"));
+        }
+    }
+
+    fn saved_round(&self, round: &Round) -> crate::state::SavedRound {
+        use crate::state::{SavedCapture, SavedRound, SavedState, compress_styles};
+        let now = (Instant::now(), SystemTime::now());
+        SavedRound {
+            prompt: round.prompt.clone(),
+            names: round.names.clone(),
+            delivered: round
+                .delivered
+                .iter()
+                .map(|d| d.map(|(at, _)| now.1 - now.0.duration_since(at)))
+                .collect(),
+            captures: round
+                .captures
+                .iter()
+                .map(|c| {
+                    c.as_ref().map(|c| SavedCapture {
+                        text: c.text.clone(),
+                        finished: c.finished,
+                        model: c.model.clone(),
+                        styles: c
+                            .styles
+                            .iter()
+                            .map(|(line, styles)| (line.clone(), compress_styles(styles)))
+                            .collect(),
+                        report: c.report.clone(),
+                    })
+                })
+                .collect(),
+            state: match round.state() {
+                SummaryState::Waiting => SavedState::Waiting,
+                SummaryState::Running { .. } => {
+                    SavedState::Failed("interrupted by a restart; Ctrl+R compares again".into())
+                }
+                SummaryState::Done { text, took } => SavedState::Done {
+                    text,
+                    took_secs: took.as_secs(),
+                },
+                SummaryState::Failed(err) => SavedState::Failed(err),
+                SummaryState::Superseded => SavedState::Superseded,
+            },
+            started_at: round.started_at,
+            compared_unfinished: round.compared_unfinished,
+            followed_up: round.followed_up.clone(),
+            reopened: round.reopened.clone(),
+            outputs: round.outputs.clone(),
+        }
+    }
+
+    fn saved_run(&self, run: &Run) -> crate::state::SavedRun {
+        let names = |panes: &[usize]| -> Vec<String> {
+            panes
+                .iter()
+                .map(|&p| self.panes[p].name().to_string())
+                .collect()
+        };
+        let now = (Instant::now(), SystemTime::now());
+        crate::state::SavedRun {
+            steps: run.steps.clone(),
+            states: run.states.clone(),
+            cancelled: run.cancelled,
+            last_send: run
+                .last_send
+                .as_ref()
+                .map(|(panes, _, time)| (names(panes), *time)),
+            started: now.1 - now.0.duration_since(run.started.0),
+            seen: run.seen,
+            satisfied: names(&run.satisfied),
+            // A paused script still waits for the same harnesses.
+            pending: names(run.interrupted.as_deref().unwrap_or(&run.pending)),
+        }
+    }
+
+    fn restore(&mut self, saved: crate::state::Saved) {
+        use crate::state::{SavedState, expand_styles};
+        let names: Vec<String> = self.panes.iter().map(|p| p.name().to_string()).collect();
+        let index_of = |name: &str| names.iter().position(|n| n == name);
+        let instant_of = |time: SystemTime| {
+            let ago = SystemTime::now().duration_since(time).unwrap_or_default();
+            Instant::now().checked_sub(ago).unwrap_or_else(Instant::now)
+        };
+        for saved in saved.rounds {
+            // A round for a harness no longer configured can't be shown.
+            let Some(targets) = saved
+                .names
+                .iter()
+                .map(|n| index_of(n))
+                .collect::<Option<Vec<_>>>()
+            else {
+                continue;
+            };
+            let mut round = Round::new(saved.prompt, targets, saved.names, saved.started_at);
+            round.delivered = saved
+                .delivered
+                .iter()
+                .map(|d| d.map(|time| (instant_of(time), 0)))
+                .collect();
+            round.captures = saved
+                .captures
+                .into_iter()
+                .map(|c| {
+                    c.map(|c| Capture {
+                        text: c.text,
+                        finished: c.finished,
+                        model: c.model,
+                        at: Instant::now(),
+                        styles: c
+                            .styles
+                            .iter()
+                            .map(|(line, runs)| (line.clone(), expand_styles(runs)))
+                            .collect(),
+                        report: c.report,
+                    })
+                })
+                .collect();
+            round.set_state(match saved.state {
+                SavedState::Waiting => SummaryState::Waiting,
+                SavedState::Done { text, took_secs } => SummaryState::Done {
+                    text,
+                    took: Duration::from_secs(took_secs),
+                },
+                SavedState::Failed(err) => SummaryState::Failed(err),
+                SavedState::Superseded => SummaryState::Superseded,
+            });
+            round.compared_unfinished = saved.compared_unfinished;
+            round.reopened = saved.reopened;
+            round.outputs = saved.outputs;
+            // The harnesses are new sessions: nothing they show belongs to
+            // the round, but a report file still can.
+            round.followed_up = vec![true; round.targets.len()];
+            for slot in 0..round.targets.len() {
+                if round.captures[slot].is_none()
+                    && round.delivered[slot].is_some()
+                    && round.outputs[slot].is_none()
+                {
+                    round.captures[slot] = Some(Capture {
+                        text: "(not captured: agent-tabs was restarted first)".into(),
+                        finished: true,
+                        model: None,
+                        at: Instant::now(),
+                        styles: Default::default(),
+                        report: None,
+                    });
+                }
+            }
+            self.rounds.push(round);
+        }
+        let mut paused = false;
+        if let Some(saved) = saved.run {
+            let indices = |names: &[String]| -> Vec<usize> {
+                names.iter().filter_map(|n| index_of(n)).collect()
+            };
+            let running = !saved.cancelled
+                && saved
+                    .states
+                    .iter()
+                    .any(|s| matches!(s, StepState::Pending | StepState::Active));
+            paused = running;
+            self.run = Some(Run {
+                steps: saved.steps,
+                states: saved.states,
+                cancelled: saved.cancelled,
+                last_send: saved
+                    .last_send
+                    .map(|(names, time)| (indices(&names), instant_of(time), time)),
+                started: (instant_of(saved.started), saved.started),
+                detail: String::new(),
+                seen: saved.seen,
+                satisfied: indices(&saved.satisfied),
+                pending: Vec::new(),
+                interrupted: running.then(|| indices(&saved.pending)),
+            });
+        }
+        if let Some(last) = self.rounds.len().checked_sub(1) {
+            self.main_folded.clear();
+            self.view_round(last);
+        }
+        let rounds = self.rounds.len();
+        if paused {
+            self.flash(format!(
+                "restored {rounds} rounds; the script is paused: Ctrl+G in the main tab resumes it"
+            ));
+        } else if rounds > 0 {
+            self.flash(format!("restored {rounds} rounds"));
+        }
     }
 
     pub fn tick_rounds(&mut self) -> bool {
@@ -2085,6 +2411,7 @@ impl App {
             KeyCode::Char('p') if ctrl => self.view_round(self.main_view.saturating_sub(1)),
             KeyCode::Char('n') if ctrl => self.view_round((self.main_view + 1).min(last)),
             KeyCode::Char('x') if ctrl => self.cancel_run(),
+            KeyCode::Char('g') if ctrl => self.resume_run(),
             KeyCode::Char('s') if ctrl => self.skip_wait(),
             KeyCode::Char('l') if ctrl && sections > 0 => {
                 self.refresh_section(self.main_focus.min(sections - 1));
@@ -2160,7 +2487,9 @@ impl App {
         // A script's state comes first: ▶ sending or waiting for harnesses,
         // ⏸ waiting for files, then ✓ or ✗ until the tab is looked at.
         let script = self.run.as_ref().and_then(|run| {
-            if run.running() {
+            if run.running() && run.interrupted.is_some() {
+                Some(('?', Color::Magenta))
+            } else if run.running() {
                 let files = run.current().is_some_and(|i| {
                     matches!(
                         run.steps[i].command,
@@ -2625,6 +2954,7 @@ impl App {
             self.flash(format!("the prompt has not reached {name} yet"));
             return;
         };
+        self.state_dirty = true;
         let before = round.answer(section);
         let capture = self.capture_slot(index, section, mark, true);
         self.log_capture(index, section, &capture);
@@ -3502,6 +3832,73 @@ mod tests {
                 "{marker}"
             );
         }
+    }
+
+    #[test]
+    fn rounds_and_a_paused_script_survive_a_restart() {
+        let dir = std::env::temp_dir().join(format!("agent-tabs-restart-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = dir.join("state.json");
+        let writer = |name: &str, model: &str| {
+            let file = dir.join(format!("r-{}.md", model.replace(' ', "-")));
+            let mut h = script_harness(
+                name,
+                &format!(
+                    "printf '\\033[?2004h'; read l; printf 'verdict: approve\\n' > '{}'; sleep 30",
+                    file.display()
+                ),
+            );
+            h.model = Some(model.into());
+            h
+        };
+        let mut silent = cat_harness("b");
+        silent.model = Some("B M".into());
+        let script = format!(
+            "DIR={}\n::send a b\nOUTPUT_FILE=$DIR/r-$MODEL_ID.md\nreview it\n::wait-model-files $OUTPUT_FILE\n::send a\nall done",
+            dir.display()
+        );
+
+        let mut first = app_with(vec![writer("a", "A M"), silent]);
+        first.use_state_file(state.clone(), false);
+        thread::sleep(Duration::from_millis(200));
+        submit_in_main(&mut first, &script);
+        tick_until(&mut first, "a's report", |a| {
+            a.rounds[0].captures[0].is_some() && a.run.as_ref().unwrap().satisfied == [0]
+        });
+        first.save_state();
+        drop(first);
+
+        // Same names, new sessions; this time b writes its report.
+        let mut second = app_with(vec![writer("a", "A M"), writer("b", "B M")]);
+        second.use_state_file(state.clone(), true);
+        assert_eq!(second.rounds.len(), 1);
+        let capture = second.rounds[0].captures[0].as_ref().unwrap();
+        assert_eq!(capture.text, "verdict: approve\n");
+        assert!(
+            second.rounds[0].captures[1].is_none(),
+            "b's report may still come"
+        );
+        assert_eq!(second.run.as_ref().unwrap().interrupted, Some(vec![1]));
+        second.select(second.main_tab());
+        let text = main_text(&second);
+        assert!(text.contains("Script paused by a restart"), "{text}");
+        assert!(text.contains("again to b and resumes"), "{text}");
+        assert_eq!(second.main_tab_label().0, "?main");
+        thread::sleep(Duration::from_millis(200));
+        assert!(!second.tick_run(), "paused until Ctrl+G");
+
+        second.handle_event(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        assert_eq!(second.rounds.len(), 2);
+        assert_eq!(second.rounds[1].names, ["b"], "only b is asked again");
+        tick_until(&mut second, "the end", |a| {
+            !a.run.as_ref().unwrap().running()
+        });
+        assert_eq!(
+            second.rounds.last().unwrap().names,
+            ["a"],
+            "then the next step"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

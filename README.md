@@ -30,6 +30,7 @@ cd /path/to/repo
 agent-tabs
 agent-tabs --only claude,codex
 agent-tabs --log-dir ~/agent-tabs-logs
+agent-tabs --no-restore   # start without the last run's rounds and script
 ```
 
 All harnesses start in the current directory, or in `--cwd DIR`.
@@ -226,6 +227,7 @@ the tab's own commands use control keys:
 | `Ctrl+P` / `Ctrl+N` | Previous / next round |
 | `Ctrl+S` | Skip the wait a script is on |
 | `Ctrl+X` | Cancel the running script |
+| `Ctrl+G` | Resume a script paused by a restart |
 | `Tab` / `Shift+Tab` | Move focus between sections |
 | left click on a header, `Ctrl+O` | Fold or unfold that section (`Ctrl+O`: the focused one) |
 | `Ctrl+E` | Fold or unfold all sections |
@@ -345,6 +347,28 @@ Check if all issues from $REVIEW_COMBINED were fixed in $TARGET
   path are all errors. So is any prompt, script or not, made only of
   `NAME=value` lines, since it gives the models nothing to do.
 - One script runs at a time.
+
+### Restarting
+
+agent-tabs saves its rounds and the script in
+`~/.local/state/agent-tabs/<working directory>.json` (under
+`$XDG_STATE_HOME` if set), at most once a second while something changes and
+when it exits, and restores them when it is started again in the same
+directory. `--no-restore` starts without them; the state is still saved from
+then on.
+
+The harnesses come back as new sessions, so what they were doing is gone:
+
+- Answers already captured come back as they were, colors included. A report
+  file a round was still waiting for is still watched, and fills its section
+  when it's written. An answer that was neither captured nor written to a
+  file says so.
+- A script that was running comes back paused, and the main tab's marker
+  shows `?`. Its step list says which harnesses hadn't finished the step it
+  was on. `Ctrl+G` sends that step's prompt again to just those harnesses
+  (the others' files or answers still count) and carries on; `Ctrl+X`
+  cancels it. A comparison that was running is marked failed; `Ctrl+R` runs
+  it again.
 
 ## Selecting and copying text
 
