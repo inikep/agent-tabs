@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::commands::CommandsConfig;
 use crate::rounds::MainConfig;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -223,6 +224,10 @@ pub struct Config {
     /// still accepted.
     #[serde(default, alias = "summary")]
     pub main: MainConfig,
+    /// `[commands]`: where the `/NAME` templates are, and the variables
+    /// they get.
+    #[serde(default)]
+    pub commands: CommandsConfig,
     #[serde(rename = "harness", default = "default_harnesses")]
     pub harnesses: Vec<Harness>,
 }
@@ -324,6 +329,7 @@ impl Default for Config {
             input_patterns: default_input_patterns(),
             working_patterns: default_working_patterns(),
             main: MainConfig::default(),
+            commands: CommandsConfig::default(),
             harnesses: default_harnesses(),
         }
     }
@@ -358,6 +364,7 @@ impl Config {
         self.dialog_regex()?;
         self.input_regex()?;
         self.working_regex()?;
+        self.commands.validate()?;
         let mut seen = std::collections::HashSet::new();
         for h in &self.harnesses {
             anyhow::ensure!(!h.name.trim().is_empty(), "harness with empty name");

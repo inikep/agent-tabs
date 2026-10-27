@@ -1,5 +1,6 @@
 mod app;
 mod clipboard;
+mod commands;
 mod composer;
 mod config;
 mod keys;

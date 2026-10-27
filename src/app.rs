@@ -915,6 +915,14 @@ impl App {
     /// `::` commands. Returns false, with the reason shown, if nothing was
     /// sent.
     fn submit(&mut self, text: &str, targets: &[usize]) -> bool {
+        let command = match crate::commands::expand(text, &self.config.commands) {
+            Ok(command) => command,
+            Err(err) => {
+                self.flash_error(format!("not sent: {err}"));
+                return false;
+            }
+        };
+        let text = command.as_ref().map_or(text, |c| c.text.as_str());
         let names: Vec<&str> = self.panes.iter().map(Pane::name).collect();
         match crate::script::parse(text, &names) {
             Ok(None) => {
@@ -934,6 +942,10 @@ impl App {
                 true
             }
             Err(err) => {
+                let err = match &command {
+                    Some(command) => command.error(&err),
+                    None => err,
+                };
                 self.flash_error(format!("not sent: {err}"));
                 false
             }
@@ -1459,6 +1471,9 @@ impl App {
                 "A prompt with ::send, ::wait-model-files, ::wait-file or ::wait-done lines runs as a script;",
             ),
             Line::from("in the main tab Ctrl+S skips the wait it is on and Ctrl+X cancels it."),
+            Line::from(
+                "/review BASE..TARGET: every model reviews BASE..TARGET, then one merges the reviews.",
+            ),
             Line::from(
                 "Rounds and the script are saved; after a restart Ctrl+G resumes a paused script.",
             ),
@@ -3042,6 +3057,7 @@ mod tests {
             input_patterns: crate::config::default_input_patterns(),
             working_patterns: crate::config::default_working_patterns(),
             main: test_main_config(),
+            commands: Default::default(),
             harnesses,
         };
         let mut app = App::new(
@@ -3420,6 +3436,7 @@ mod tests {
             input_patterns: crate::config::default_input_patterns(),
             working_patterns: crate::config::default_working_patterns(),
             main: test_main_config(),
+            commands: Default::default(),
             harnesses: vec![script_harness("p", "printf 'args:%s' \"$*\"; sleep 5")],
         };
         config.harnesses[0].yolo_args = Some(vec!["--approve".into()]);
@@ -3902,6 +3919,52 @@ mod tests {
     }
 
     #[test]
+    fn review_runs_the_review_template() {
+        let mut app = app_with(vec![cat_harness("opus-5.5"), cat_harness("b")]);
+        app.config.commands.variables = test_review_variables();
+        thread::sleep(Duration::from_millis(200));
+        submit_in_main(&mut app, "/review percona/8.4..PS-1");
+        assert_eq!(app.main_input.text(), "");
+        let text = main_text(&app);
+        assert!(text.contains("✓ ::send all"), "{text}");
+        assert!(text.contains("● ::wait-model-files $OUTPUT_FILE"), "{text}");
+        assert!(text.contains("::send opus-5.5"), "{text}");
+        tick_until(&mut app, "the prompt", |a| {
+            let screen = screen(a.pane(1));
+            screen.contains("TARGET=PS-1") && screen.contains("$PROMPT_DIR/review.md")
+        });
+    }
+
+    #[test]
+    fn a_template_mistake_names_the_template() {
+        let mut app = app_with(vec![cat_harness("a"), cat_harness("b")]);
+        app.config.commands.variables = test_review_variables();
+        submit_in_main(&mut app, "/review percona/8.4..PS-1");
+        assert_eq!(app.main_input.text(), "/review percona/8.4..PS-1");
+        let message = &app.message.as_ref().unwrap().0;
+        assert!(
+            message.contains("commands/review.txt: line 13: unknown target opus-5.5"),
+            "{message}"
+        );
+
+        app.config.commands.variables.clear();
+        app.main_input.clear();
+        submit_in_main(&mut app, "/review percona/8.4..PS-1");
+        let message = &app.message.as_ref().unwrap().0;
+        assert!(
+            message.contains("commands/review.txt: line 8: $REVIEW_DIR is not set"),
+            "{message}"
+        );
+    }
+
+    fn test_review_variables() -> indexmap::IndexMap<String, String> {
+        indexmap::IndexMap::from([
+            ("REVIEW_DIR".into(), "/nonexistent/reviews/$TARGET".into()),
+            ("PROMPT_DIR".into(), "/nonexistent/prompts".into()),
+        ])
+    }
+
+    #[test]
     fn a_script_with_a_mistake_is_not_sent_and_stays_in_the_box() {
         let mut app = app_with(vec![cat_harness("a"), cat_harness("b")]);
         thread::sleep(Duration::from_millis(200));
@@ -4179,6 +4242,7 @@ mod tests {
             input_patterns: crate::config::default_input_patterns(),
             working_patterns: crate::config::default_working_patterns(),
             main: test_main_config(),
+            commands: Default::default(),
             harnesses: names.iter().map(|n| cat_harness(n)).collect(),
         };
         let mut app = App::new(
@@ -4389,6 +4453,7 @@ mod tests {
             input_patterns: crate::config::default_input_patterns(),
             working_patterns: crate::config::default_working_patterns(),
             main: test_main_config(),
+            commands: Default::default(),
             harnesses: vec![cat_harness("a")],
         };
         let mut app = App::new(

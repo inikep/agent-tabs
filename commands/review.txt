@@ -1,0 +1,17 @@
+::# /review BASE..TARGET: every enabled model reviews BASE..TARGET, the coordinator merges the reviews.
+::# REVIEW_DIR and PROMPT_DIR come from [commands.variables] in the config, COORDINATOR from
+::# [commands] coordinator.
+::args BASE..TARGET
+
+::# Every enabled model reviews the branch into its own file
+::send all
+OUTPUT_FILE=$REVIEW_DIR/review-$MODEL_ID.md
+Read instructions from $PROMPT_DIR/review.md
+::wait-model-files $OUTPUT_FILE
+
+::# The coordinator merges the reviews
+::send $COORDINATOR
+REVIEW_FILES=$REVIEW_DIR/review-*.md
+REVIEW_COMBINED=$REVIEW_DIR/review-combined.md
+Read instructions from $PROMPT_DIR/review-merge.md
+::wait-file $REVIEW_COMBINED

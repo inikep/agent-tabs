@@ -350,6 +350,79 @@ Check if all issues from $REVIEW_COMBINED were fixed in $TARGET
   `NAME=value` lines, since it gives the models nothing to do.
 - One script runs at a time.
 
+### Command templates
+
+`/NAME ARGS…` in either prompt box sends the template `NAME.txt` from this
+repository's [`commands/`](commands/), found through the path agent-tabs
+was built from (`dir` under `[commands]` in the config overrides it). A
+template is an ordinary prompt or a script whose values come from the
+command's arguments and from the config. There is one so far,
+[`commands/review.txt`](commands/review.txt):
+
+```text
+::# /review BASE..TARGET: every enabled model reviews BASE..TARGET, the coordinator merges the reviews.
+::# REVIEW_DIR and PROMPT_DIR come from [commands.variables] in the config, COORDINATOR from
+::# [commands] coordinator.
+::args BASE..TARGET
+
+::# Every enabled model reviews the branch into its own file
+::send all
+OUTPUT_FILE=$REVIEW_DIR/review-$MODEL_ID.md
+Read instructions from $PROMPT_DIR/review.md
+::wait-model-files $OUTPUT_FILE
+
+::# The coordinator merges the reviews
+::send $COORDINATOR
+REVIEW_FILES=$REVIEW_DIR/review-*.md
+REVIEW_COMBINED=$REVIEW_DIR/review-combined.md
+Read instructions from $PROMPT_DIR/review-merge.md
+::wait-file $REVIEW_COMBINED
+```
+
+```toml
+[commands]
+coordinator = "opus-5.5"   # the default
+
+[commands.variables]
+REVIEW_DIR = "/work/LLM-reviews/$TARGET"
+PROMPT_DIR = "/data/sh/LLM/prompts"
+```
+
+`/review percona/8.4..PS-11925-8.4-bump_libkmip` then runs the template
+with these lines on top, which the script shares with every prompt it
+sends:
+
+```text
+BASE=percona/8.4
+TARGET=PS-11925-8.4-bump_libkmip
+REVIEW_DIR=/work/LLM-reviews/$TARGET
+PROMPT_DIR=/data/sh/LLM/prompts
+```
+
+- `::args` lists one word per argument. In a word, each variable name
+  matches part of the argument and the rest is matched literally:
+  `BASE..TARGET` splits `a..b` at its first `..`.
+- Arguments written as `NAME=value` set or override any variable, e.g.
+  `/review percona/8.4..PS-1 REVIEW_DIR=/tmp/reviews`.
+- `$COORDINATOR` is the harness that coordinates the others, here the one
+  that merges the reviews: `coordinator` under `[commands]`, `opus-5.5` by
+  default, or `COORDINATOR=gpt-6` after `/review` for one run. Since the
+  script takes harness names as written, agent-tabs fills in variables in
+  `::send` and `::wait-done` lines itself.
+- `[commands.variables]` come after the arguments, in the order written,
+  so a value can use `$TARGET` or a variable above it.
+- A `$NAME` that the template uses and nothing sets (not an argument, the
+  config, a `NAME=value` line in the template, `MODEL_ID` or the
+  environment) is an error, so a missing `PROMPT_DIR` isn't sent to the
+  models as `$PROMPT_DIR`.
+- The template is read each time you use it, so an edit, or a new file in
+  `commands/`, takes effect right away without a rebuild. A mistake in a
+  template, such as a `::send` to a harness your config doesn't have, is
+  reported with the file and line when you use it, and nothing is sent.
+- `/NAME` without arguments, when its template has an `::args` line, is
+  sent to the harnesses as it is, so their own commands (claude's and
+  codex's `/review`) still work. So is `/NAME` without a template.
+
 ### Restarting
 
 agent-tabs saves its rounds and the script in
@@ -425,6 +498,14 @@ wait_timeout_secs = 900
 run_timeout_secs = 300
 max_lines = 400
 output_vars = ["OUTPUT_FILE", "REVIEW_COMBINED"]
+
+[commands]
+dir = "/path/to/agent-tabs/commands"
+coordinator = "opus-5.5"
+
+[commands.variables]
+REVIEW_DIR = "/work/LLM-reviews/$TARGET"
+PROMPT_DIR = "/data/sh/LLM/prompts"
 
 [[harness]]
 name = "claude"
