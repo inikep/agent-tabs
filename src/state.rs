@@ -25,6 +25,11 @@ pub struct Saved {
 pub struct SavedRound {
     pub prompt: String,
     pub names: Vec<String>,
+    /// Each section's prompt and script step; empty in older files.
+    #[serde(default)]
+    pub prompts: Vec<String>,
+    #[serde(default)]
+    pub steps: Vec<usize>,
     /// When the prompt reached each harness.
     pub delivered: Vec<Option<SystemTime>>,
     pub captures: Vec<Option<SavedCapture>>,
@@ -65,6 +70,9 @@ pub struct SavedRun {
     /// Harnesses the current wait already counted, and those it still waits for.
     pub satisfied: Vec<String>,
     pub pending: Vec<String>,
+    /// The script's round, as an index into the saved rounds.
+    #[serde(default)]
+    pub round: Option<usize>,
 }
 
 pub fn compress_styles(styles: &[Style]) -> Vec<(usize, Style)> {

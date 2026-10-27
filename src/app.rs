@@ -133,6 +133,8 @@ struct Run {
     /// Set for a script restored after a restart: it waits for Ctrl+G, which
     /// sends the interrupted step's prompt again to these harnesses.
     interrupted: Option<Vec<usize>>,
+    /// The script's round in `rounds`, which each `::send` adds to.
+    round: Option<usize>,
 }
 
 impl Run {
@@ -183,6 +185,17 @@ fn styled_line(prefix: &str, cells: crate::rounds::Cells) -> Line<'static> {
 /// few milliseconds, so a file written right after `since` may look older.
 fn written_since(modified: SystemTime, since: SystemTime) -> bool {
     modified + Duration::from_millis(500) >= since
+}
+
+/// `names` without repeats, in order.
+fn unique(names: &[String]) -> Vec<&str> {
+    let mut seen = Vec::new();
+    for name in names {
+        if !seen.contains(&name.as_str()) {
+            seen.push(name.as_str());
+        }
+    }
+    seen
 }
 
 /// Drawn after the fold arrow of each main tab section header.
@@ -952,19 +965,26 @@ impl App {
         }
     }
 
-    /// Sends `text` to `targets`. A prompt to several harnesses, or any
-    /// prompt from a script, is followed as a round in the main tab.
+    /// Sends `text` to `targets`. A prompt to several harnesses is followed
+    /// as a round in the main tab; a script's prompts all go to its round.
     fn submit_prompt(&mut self, text: &str, targets: &[usize], from_script: bool) {
-        let delay = Duration::from_millis(self.config.submit_delay_ms);
-        let mut sent = Vec::new();
-        let mut queued = Vec::new();
         for &i in targets {
             self.start(i);
         }
-        if targets.len() >= 2 || from_script {
-            // A script's earlier rounds are still compared.
-            self.start_round(text, targets, !from_script);
+        if from_script {
+            self.add_to_script_round(text, targets);
+        } else if targets.len() >= 2 {
+            self.start_round(text, targets, true);
         }
+        self.send_or_queue(text, targets);
+    }
+
+    /// Sends `text` to each of `targets` that is ready, and queues it for
+    /// the others.
+    fn send_or_queue(&mut self, text: &str, targets: &[usize]) {
+        let delay = Duration::from_millis(self.config.submit_delay_ms);
+        let mut sent = Vec::new();
+        let mut queued = Vec::new();
         for &i in targets {
             if self.readiness(i) == Readiness::Ready {
                 self.send_to(i, text, delay);
@@ -1498,9 +1518,11 @@ impl App {
     }
 
     fn start_round(&mut self, text: &str, targets: &[usize], supersede: bool) {
+        let script = self.run.as_ref().and_then(|r| r.round);
         if supersede
             && let Some(last) = self.rounds.last()
             && last.state() == SummaryState::Waiting
+            && script != Some(self.rounds.len() - 1)
         {
             last.set_state(SummaryState::Superseded);
         }
@@ -1518,31 +1540,61 @@ impl App {
         self.view_round(self.rounds.len() - 1);
     }
 
+    /// Adds a script's `::send` to the script's round, which its first
+    /// `::send` starts.
+    fn add_to_script_round(&mut self, text: &str, targets: &[usize]) {
+        let names: Vec<String> = targets
+            .iter()
+            .map(|&i| self.panes[i].name().to_string())
+            .collect();
+        let index = self
+            .run
+            .as_ref()
+            .and_then(|r| r.round)
+            .filter(|&i| i < self.rounds.len());
+        let Some(index) = index else {
+            self.start_round(text, targets, false);
+            if let Some(run) = self.run.as_mut() {
+                run.round = Some(self.rounds.len() - 1);
+            }
+            return;
+        };
+        let before = self.rounds[index].targets.len();
+        self.rounds[index].add_step(text, targets, names);
+        // The new sections start folded, before the comparison.
+        if self.main_view == index && self.main_folded.len() >= before {
+            for _ in targets {
+                self.main_folded.insert(before, true);
+            }
+        }
+    }
+
     fn mark_delivered(&mut self, pane: usize) {
         let mark = self.panes[pane].history_mark();
         let model_id = self.model_id(pane);
-        let earlier = self.rounds.len().saturating_sub(1);
-        for round in &mut self.rounds[..earlier] {
-            if let Some(slot) = round.slot(pane)
-                && round.delivered[slot].is_some()
-            {
-                round.followed_up[slot] = true;
-            }
-        }
-        let Some(round) = self.rounds.last_mut() else {
-            return;
-        };
-        if let Some(slot) = round.slot(pane) {
-            if round.delivered[slot].is_some() {
-                round.followed_up[slot] = true;
-            } else if round.state() == SummaryState::Waiting {
-                round.delivered[slot] = Some((Instant::now(), mark));
-                round.outputs[slot] = crate::rounds::output_file(
-                    &round.prompt,
-                    &self.config.main.output_vars,
-                    model_id.as_deref(),
-                )
-                .map(|path| (self.cwd.join(path), SystemTime::now()));
+        // The prompt is for the pane's first section not yet delivered, in
+        // the latest round or the script's.
+        let last = self.rounds.len().checked_sub(1);
+        let script = self.run.as_ref().and_then(|r| r.round);
+        let mut delivered = false;
+        for (index, round) in self.rounds.iter_mut().enumerate() {
+            let open = Some(index) == last || Some(index) == script;
+            for slot in 0..round.targets.len() {
+                if round.targets[slot] != pane {
+                    continue;
+                }
+                if round.delivered[slot].is_some() {
+                    round.followed_up[slot] = true;
+                } else if open && !delivered && round.state() == SummaryState::Waiting {
+                    round.delivered[slot] = Some((Instant::now(), mark));
+                    round.outputs[slot] = crate::rounds::output_file(
+                        &round.prompts[slot],
+                        &self.config.main.output_vars,
+                        model_id.as_deref(),
+                    )
+                    .map(|path| (self.cwd.join(path), SystemTime::now()));
+                    delivered = true;
+                }
             }
         }
     }
@@ -1628,10 +1680,11 @@ impl App {
         } else {
             "unfinished"
         };
-        let file = dir.join(format!(
-            "{}-{}-{}.txt",
-            round.started_at, round.names[slot], state
-        ));
+        let name = round
+            .section_name(slot)
+            .replace(" · ", "-")
+            .replace(' ', "-");
+        let file = dir.join(format!("{}-{name}-{state}.txt", round.started_at));
         let _ = std::fs::write(file, &capture.text);
     }
 
@@ -1660,6 +1713,7 @@ impl App {
             satisfied: Vec::new(),
             pending: Vec::new(),
             interrupted: None,
+            round: None,
         });
         self.flash(format!("script started: {n} steps"));
         self.tick_run();
@@ -1941,12 +1995,28 @@ impl App {
                 Command::Send { text, .. } => Some(text.clone()),
                 _ => None,
             });
+        let round = run.round.filter(|&i| i < self.rounds.len());
         self.state_dirty = true;
         if let Some(text) = text
             && !resend.is_empty()
         {
+            // The resent prompt is for the sections the restart interrupted.
+            if let Some(round) = round.map(|i| &mut self.rounds[i]) {
+                for &pane in &resend {
+                    if let Some(slot) = round.last_slot(pane) {
+                        round.delivered[slot] = None;
+                        round.followed_up[slot] = false;
+                        round.captures[slot] = None;
+                        round.outputs[slot] = None;
+                        round.added[slot] = Instant::now();
+                    }
+                }
+            }
+            for &i in &resend {
+                self.start(i);
+            }
             let sent = (Instant::now(), SystemTime::now());
-            self.submit_prompt(&text, &resend, true);
+            self.send_or_queue(&text, &resend);
             if let Some(run) = self.run.as_mut()
                 && let Some(last) = run.last_send.as_mut()
             {
@@ -1991,6 +2061,8 @@ impl App {
         SavedRound {
             prompt: round.prompt.clone(),
             names: round.names.clone(),
+            prompts: round.prompts.clone(),
+            steps: round.steps.clone(),
             delivered: round
                 .delivered
                 .iter()
@@ -2054,6 +2126,7 @@ impl App {
             satisfied: names(&run.satisfied),
             // A paused script still waits for the same harnesses.
             pending: names(run.interrupted.as_deref().unwrap_or(&run.pending)),
+            round: run.round,
         }
     }
 
@@ -2065,6 +2138,8 @@ impl App {
             let ago = SystemTime::now().duration_since(time).unwrap_or_default();
             Instant::now().checked_sub(ago).unwrap_or_else(Instant::now)
         };
+        // Where each saved round ends up in `rounds`, if anywhere.
+        let mut restored: Vec<Option<usize>> = Vec::new();
         for saved in saved.rounds {
             // A round for a harness no longer configured can't be shown.
             let Some(targets) = saved
@@ -2073,9 +2148,16 @@ impl App {
                 .map(|n| index_of(n))
                 .collect::<Option<Vec<_>>>()
             else {
+                restored.push(None);
                 continue;
             };
+            restored.push(Some(self.rounds.len()));
+            let n = targets.len();
             let mut round = Round::new(saved.prompt, targets, saved.names, saved.started_at);
+            if saved.prompts.len() == n && saved.steps.len() == n {
+                round.prompts = saved.prompts;
+                round.steps = saved.steps;
+            }
             round.delivered = saved
                 .delivered
                 .iter()
@@ -2155,6 +2237,7 @@ impl App {
                 satisfied: indices(&saved.satisfied),
                 pending: Vec::new(),
                 interrupted: running.then(|| indices(&saved.pending)),
+                round: saved.round.and_then(|i| restored.get(i).copied().flatten()),
             });
         }
         if let Some(last) = self.rounds.len().checked_sub(1) {
@@ -2185,10 +2268,10 @@ impl App {
             return false;
         }
         let quiet = Duration::from_secs(self.config.main.quiet_secs);
-        let timed_out = self.rounds[index].started.elapsed()
-            >= Duration::from_secs(self.config.main.wait_timeout_secs);
+        let timeout = Duration::from_secs(self.config.main.wait_timeout_secs);
         let mut changed = false;
         for slot in 0..self.rounds[index].targets.len() {
+            let timed_out = self.rounds[index].added[slot].elapsed() >= timeout;
             let existing = self.rounds[index].captures[slot]
                 .as_ref()
                 .map(|c| c.finished);
@@ -2553,8 +2636,8 @@ impl App {
             .and_then(|c| c.model.clone())
             .or_else(|| self.model_of(round.targets[slot]));
         match model {
-            Some(model) => format!("{} · {model}", round.names[slot]),
-            None => round.names[slot].clone(),
+            Some(model) => format!("{} · {model}", round.section_name(slot)),
+            None => round.section_name(slot),
         }
     }
 
@@ -2663,7 +2746,7 @@ impl App {
                     self.rounds.len()
                 ))
                 .bold(),
-                Span::raw(format!("  ·  {}", round.names.join(", "))).dark_gray(),
+                Span::raw(format!("  ·  {}", unique(&round.names).join(", "))).dark_gray(),
                 Span::raw(
                     "   click or Ctrl+O to fold · ⟳ or Ctrl+L refresh · Tab focus · Ctrl+E fold all",
                 )
@@ -3793,12 +3876,18 @@ mod tests {
         );
         tick_until(&mut app, "the end", |a| !a.run.as_ref().unwrap().running());
         assert!(main_text(&app).contains("Script finished"));
+        assert_eq!(app.rounds.len(), 1, "a script is one round");
+        let round = &app.rounds[0];
+        assert_eq!(round.names, ["a", "b", "c"]);
         assert_eq!(
-            app.rounds.len(),
-            2,
-            "one round per ::send, even for one harness"
+            round.prompts[2],
+            format!("DIR={}\nmerge them", dir.display())
         );
-        assert_ne!(app.rounds[0].state(), SummaryState::Superseded);
+        let text = main_text(&app);
+        assert!(text.contains("Round 1 of 1  ·  a, b, c"), "{text}");
+        assert!(text.contains("c · step 2"), "{text}");
+        assert!(text.contains("a · step 1"), "{text}");
+        assert_ne!(round.state(), SummaryState::Superseded);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -3905,15 +3994,26 @@ mod tests {
         assert!(!second.tick_run(), "paused until Ctrl+G");
 
         second.handle_event(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
-        assert_eq!(second.rounds.len(), 2);
-        assert_eq!(second.rounds[1].names, ["b"], "only b is asked again");
+        assert_eq!(second.rounds.len(), 1, "the script's round goes on");
+        assert!(
+            second.rounds[0].delivered[0].is_some(),
+            "a isn't asked again"
+        );
+        tick_until(&mut second, "b's resent prompt", |a| {
+            a.rounds[0].delivered[1].is_some()
+        });
         tick_until(&mut second, "the end", |a| {
             !a.run.as_ref().unwrap().running()
         });
+        tick_until(&mut second, "b's report", |a| {
+            a.rounds[0].captures[1].is_some()
+        });
+        let round = &second.rounds[0];
+        assert_eq!(round.names, ["a", "b", "a"], "then the next step");
         assert_eq!(
-            second.rounds.last().unwrap().names,
-            ["a"],
-            "then the next step"
+            round.captures[1].as_ref().unwrap().text,
+            "verdict: approve\n",
+            "b's resent prompt counts for its section"
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -4005,6 +4105,39 @@ mod tests {
     }
 
     #[test]
+    fn a_prompt_sent_during_a_script_leaves_the_scripts_round_alone() {
+        let dir = std::env::temp_dir().join(format!("agent-tabs-during-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("go");
+        let mut app = app_with(vec![cat_harness("a"), cat_harness("b")]);
+        thread::sleep(Duration::from_millis(200));
+        submit_in_main(
+            &mut app,
+            &format!(
+                "::send a b\nreview\n::wait-file {}\n::send a\nmerge",
+                file.display()
+            ),
+        );
+        tick_until(&mut app, "the reviews", |a| {
+            a.rounds[0].delivered.iter().all(Option::is_some)
+        });
+        submit_in_main(&mut app, "meanwhile");
+        assert_eq!(app.rounds.len(), 2);
+        assert_ne!(app.rounds[0].state(), SummaryState::Superseded);
+        std::fs::write(&file, "x").unwrap();
+        tick_until(&mut app, "the merge", |a| {
+            a.rounds[0].delivered.get(2).is_some_and(Option::is_some)
+        });
+        assert_eq!(app.rounds[0].names, ["a", "b", "a"]);
+        assert_eq!(
+            app.rounds[1].names,
+            ["a", "b"],
+            "meanwhile keeps its own round"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn report_is_taken_when_its_harness_moved_on_to_the_next_prompt() {
         let dir = std::env::temp_dir().join(format!("agent-tabs-moved-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -4023,7 +4156,9 @@ mod tests {
                 dir.display()
             ),
         );
-        tick_until(&mut app, "the second send", |a| a.rounds.len() == 2);
+        tick_until(&mut app, "the second send", |a| {
+            a.rounds[0].targets.len() == 2
+        });
         tick_until(&mut app, "the merge round's report", |a| {
             a.rounds[0].captures[0].is_some()
         });

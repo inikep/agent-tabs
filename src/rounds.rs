@@ -86,15 +86,22 @@ pub struct Capture {
 /// A line of chars, each with the style the harness drew it in.
 pub type Cells = Vec<(char, Style)>;
 
+/// One prompt's answers, a section per harness. A script's round also gets
+/// the harnesses of its later `::send`s, each with that step's prompt.
 #[derive(Debug)]
 pub struct Round {
     pub prompt: String,
     pub targets: Vec<usize>,
     pub names: Vec<String>,
+    /// The prompt each harness was sent.
+    pub prompts: Vec<String>,
+    /// Which of a script's `::send`s each harness's section is for, from 0.
+    pub steps: Vec<usize>,
+    /// When each section was added, for `wait_timeout_secs`.
+    pub added: Vec<Instant>,
     pub delivered: Vec<Option<(Instant, usize)>>,
     pub captures: Vec<Option<Capture>>,
     pub state: Arc<Mutex<SummaryState>>,
-    pub started: Instant,
     pub started_at: u64,
     pub compared_unfinished: bool,
     /// The harness got another prompt after this round's, so later output
@@ -119,13 +126,15 @@ impl Round {
     pub fn new(prompt: String, targets: Vec<usize>, names: Vec<String>, started_at: u64) -> Self {
         let n = targets.len();
         Self {
+            prompts: vec![prompt.clone(); n],
+            steps: vec![0; n],
+            added: vec![Instant::now(); n],
             prompt,
             targets,
             names,
             delivered: vec![None; n],
             captures: vec![None; n],
             state: Arc::new(Mutex::new(SummaryState::Waiting)),
-            started: Instant::now(),
             started_at,
             compared_unfinished: false,
             followed_up: vec![false; n],
@@ -143,7 +152,10 @@ impl Round {
         if capture.report.is_some() {
             return Some(capture.text.trim_end().to_string());
         }
-        Some(final_message(&extract_answer(&capture.text, &self.prompt)))
+        Some(final_message(&extract_answer(
+            &capture.text,
+            &self.prompts[slot],
+        )))
     }
 
     /// The answer reflowed for display, in the harness's own colors. A report
@@ -173,8 +185,40 @@ impl Round {
         }
     }
 
-    pub fn slot(&self, pane: usize) -> Option<usize> {
-        self.targets.iter().position(|&t| t == pane)
+    /// Adds a section per target for a script's next `::send`.
+    pub fn add_step(&mut self, prompt: &str, targets: &[usize], names: Vec<String>) {
+        let step = self.steps.iter().max().map_or(0, |s| s + 1);
+        let n = targets.len();
+        self.targets.extend(targets);
+        self.names.extend(names);
+        self.prompts
+            .extend(std::iter::repeat_n(prompt.to_string(), n));
+        self.steps.extend(std::iter::repeat_n(step, n));
+        self.added.extend(std::iter::repeat_n(Instant::now(), n));
+        self.delivered.extend(std::iter::repeat_n(None, n));
+        self.captures.extend(std::iter::repeat_n(None, n));
+        self.followed_up.extend(std::iter::repeat_n(false, n));
+        self.reopened.extend(std::iter::repeat_n(None, n));
+        self.outputs.extend(std::iter::repeat_n(None, n));
+        // A comparison made so far is missing the new answers.
+        if self.state() != SummaryState::Superseded {
+            self.set_state(SummaryState::Waiting);
+        }
+    }
+
+    /// The last section for `pane`.
+    pub fn last_slot(&self, pane: usize) -> Option<usize> {
+        self.targets.iter().rposition(|&t| t == pane)
+    }
+
+    /// The section's name: the harness, and the step for a script's later
+    /// `::send`s.
+    pub fn section_name(&self, slot: usize) -> String {
+        if self.steps.iter().any(|&s| s > 0) {
+            format!("{} · step {}", self.names[slot], self.steps[slot] + 1)
+        } else {
+            self.names[slot].clone()
+        }
     }
 
     pub fn all_finished(&self) -> bool {
@@ -1238,13 +1282,27 @@ mod tests {
     #[test]
     fn round_tracks_slots_and_captures() {
         let mut round = Round::new("p".into(), vec![0, 2], vec!["a".into(), "c".into()], 0);
-        assert_eq!(round.slot(2), Some(1));
-        assert_eq!(round.slot(1), None);
+        assert_eq!(round.last_slot(2), Some(1));
+        assert_eq!(round.last_slot(1), None);
         assert!(!round.all_captured());
         round.captures = vec![Some(capture("x", true)), Some(capture("y", true))];
         assert!(round.all_captured());
         assert!(round.input().contains("<agent name=\"c\""));
         assert_eq!(round.state(), SummaryState::Waiting);
+    }
+
+    #[test]
+    fn a_script_step_adds_sections_with_its_prompt() {
+        let mut round = Round::new("review".into(), vec![0, 1], vec!["a".into(), "b".into()], 0);
+        assert_eq!(round.section_name(0), "a");
+        round.add_step("merge", &[0], vec!["a".into()]);
+        assert_eq!(round.targets, [0, 1, 0]);
+        assert_eq!(round.prompts, ["review", "review", "merge"]);
+        assert_eq!(round.last_slot(0), Some(2));
+        assert_eq!(round.section_name(0), "a · step 1");
+        assert_eq!(round.section_name(2), "a · step 2");
+        assert_eq!(round.captures.len(), 3);
+        assert_eq!(round.outputs.len(), 3);
     }
 
     #[test]

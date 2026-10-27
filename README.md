@@ -318,7 +318,7 @@ Check if all issues from $REVIEW_COMBINED were fixed in $TARGET
 
 | Command | Meaning |
 |---|---|
-| `::send TARGET…` | Send the text up to the next command to the targets, as a round in the main tab |
+| `::send TARGET…` | Send the text up to the next command to the targets; their answers join the script's round in the main tab |
 | `::wait-model-files PATH [TARGET…]` | Wait for one file per target, with `$MODEL_ID` in `PATH` set to each one's model |
 | `::wait-file PATH` | Wait for one file |
 | `::wait-done [TARGET…]` | Wait until the targets are done, by the same rules as a round |
@@ -337,10 +337,14 @@ Check if all issues from $REVIEW_COMBINED were fixed in $TARGET
   it is done instead. Waits have no timeout: `Ctrl+S` in the main tab skips
   the wait the script is on (for a model that never writes its file), and
   `Ctrl+X` cancels the script; prompts already sent keep running.
-- Each `::send` is a round, even for one harness (a single harness isn't
-  compared), and a script's rounds don't supersede each other. The script's
-  steps are listed above the rounds: `✓` done, `●` the step it's on and what
-  it waits for, `⤼` skipped, `✗` where it was cancelled.
+- A script is one round in the main tab. Its first `::send` starts the
+  round, and each later one adds a section per target, after the earlier
+  ones, so `/review` shows every model's review and then the merge. The
+  sections are named by step, e.g. `opus-5.5 · step 2`, and each is taken
+  from its own step's prompt and report file. A prompt you send while a
+  script runs gets its own round and doesn't supersede the script's. The
+  script's steps are listed above the round: `✓` done, `●` the step it's on
+  and what it waits for, `⤼` skipped, `✗` where it was cancelled.
 - The whole script is checked when you press Enter, and nothing is sent if
   something is wrong; the error names the line and the text stays in the box.
   A command has to start its line; text before the first `::send` other than
@@ -440,8 +444,9 @@ The harnesses come back as new sessions, so what they were doing is gone:
   file says so.
 - A script that was running comes back paused, and the main tab's marker
   shows `?`. Its step list says which harnesses hadn't finished the step it
-  was on. `Ctrl+G` sends that step's prompt again to just those harnesses
-  (the others' files or answers still count) and carries on; `Ctrl+X`
+  was on. `Ctrl+G` sends that step's prompt again to just those harnesses,
+  whose sections in the script's round wait for the new answer (the others'
+  files or answers still count), and carries on; `Ctrl+X`
   cancels it. A comparison that was running is marked failed; `Ctrl+R` runs
   it again.
 
