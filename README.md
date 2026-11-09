@@ -291,7 +291,7 @@ targets checked in the box don't matter, because the script names its own.
 TARGET=PS-11934-8.4-H10
 REVIEW_DIR=/data/sh/LLM/reviews/$TARGET
 
-::# 1. Every enabled model reviews the branch into its own file
+::# 1. Every checked model reviews the branch into its own file
 ::send all
 BASE=inikep/8.4
 OUTPUT_FILE=$REVIEW_DIR/review-$MODEL_ID.md
@@ -327,8 +327,9 @@ Check if all issues from $REVIEW_COMBINED were fixed in $TARGET
 | `::wait-done [TARGET…]` | Wait until the targets are done, by the same rules as a round |
 | `::# text` | A comment; never sent |
 
-- A target is a tab name, or `all` for every harness that isn't disabled. A
-  disabled harness named in `::send` is started. Without targets, a wait is
+- A target is a tab name, or `all` for every harness checked in the prompt
+  box the script was sent from, so `/plan` with only one tab checked runs on
+  that one alone. A disabled harness named in `::send` is started. Without targets, a wait is
   for the targets of the last `::send`. Quote an argument with spaces.
 - The `NAME=value` lines before the first command are shared: they're put at
   the top of every prompt the script sends. Prompts are sent as written, with
@@ -370,13 +371,13 @@ command's arguments and from the config. There are three so far,
 [`commands/review.txt`](commands/review.txt):
 
 ```text
-::# /review BASE..TARGET [NOTES...]: every enabled model reviews BASE..TARGET, the coordinator
+::# /review BASE..TARGET [NOTES...]: every checked model reviews BASE..TARGET, the coordinator
 ::# merges the reviews. NOTES, e.g. "Don't build. extra/libkmip is already checked", go to every
 ::# model after the instructions. REVIEW_DIR comes from [commands.variables] in the config,
 ::# COORDINATOR from [commands] coordinator, and review.md and review-merge.md sit next to this file.
 ::args BASE..TARGET [NOTES...]
 
-::# Every enabled model reviews the branch into its own file
+::# Every checked model reviews the branch into its own file
 ::send all
 OUTPUT_FILE=$REVIEW_DIR/review-$MODEL_ID.md
 Read instructions from $PROMPT_DIR/review.md
@@ -455,7 +456,7 @@ Without notes, those lines are left out.
   sent to the harnesses as it is, so their own commands (claude's and
   codex's `/review`) still work. So is `/NAME` without a template.
 
-`/plan TARGET TASK...` has every enabled model plan the task in
+`/plan TARGET TASK...` has every checked model plan the task in
 `$PLAN_DIR` (`PLAN_DIR = "/work/LLM-plans/$TARGET"` under
 `[commands.variables]`), then improve its plan from all plans, compare the
 improved plans, improve its plan from the comparisons, and finally pick the
@@ -474,7 +475,7 @@ In $OUTPUT_FILE create a plan to $TASK
 
 and so on.
 
-`/implement BASE_BRANCH PLAN [NOTES...]` has every enabled model create its
+`/implement BASE_BRANCH PLAN [NOTES...]` has every checked model create its
 own branch `$BASE_BRANCH-$MODEL_ID` on top of `BASE_BRANCH` and implement the
 plan file there, following [`commands/implement.md`](commands/implement.md).
 That prompt takes the worktree, build dir, cmake options and MTR rules from

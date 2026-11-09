@@ -1,4 +1,4 @@
-::# /implement BASE_BRANCH PLAN [NOTES...]: every enabled model creates its own branch
+::# /implement BASE_BRANCH PLAN [NOTES...]: every checked model creates its own branch
 ::# BASE_BRANCH-MODEL_ID on top of BASE_BRANCH and implements PLAN there, following implement.md
 ::# next to this file. Both may also be given as BASE_BRANCH=… PLAN=…; NOTES go to every model
 ::# after the instructions.

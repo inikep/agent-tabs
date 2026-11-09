@@ -878,7 +878,7 @@ mod tests {
         let review = describe("review", REVIEW);
         assert!(
             review.description[0]
-                .starts_with("/review BASE..TARGET [NOTES...]: every enabled model"),
+                .starts_with("/review BASE..TARGET [NOTES...]: every checked model"),
             "{review:?}"
         );
         assert_eq!(review.description.len(), 4);

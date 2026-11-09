@@ -16,8 +16,8 @@ use crate::rounds::{assignment, expand_vars, variables};
 
 const COMMANDS: [&str; 4] = ["send", "wait-model-files", "wait-file", "wait-done"];
 
-/// Who a command is for: `all` (every harness that is not disabled) or
-/// harnesses by name.
+/// Who a command is for: `all` (every harness checked in the prompt box
+/// the script was sent from) or harnesses by name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Targets {
     All,

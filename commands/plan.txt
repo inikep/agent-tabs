@@ -1,4 +1,4 @@
-::# /plan TARGET TASK...: every enabled model plans TASK into its own file, then in four more
+::# /plan TARGET TASK...: every checked model plans TASK into its own file, then in four more
 ::# steps improves its plan using all plans, compares the plans, improves its plan using the
 ::# comparisons, and picks the best plan as a base and improves it. PLAN_DIR comes from
 ::# [commands.variables] in the config.

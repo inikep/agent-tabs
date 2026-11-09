@@ -73,6 +73,9 @@ pub struct SavedRun {
     /// The script's round, as an index into the saved rounds.
     #[serde(default)]
     pub round: Option<usize>,
+    /// The harnesses `all` means; none in older files.
+    #[serde(default)]
+    pub all: Option<Vec<String>>,
 }
 
 pub fn compress_styles(styles: &[Style]) -> Vec<(usize, Style)> {

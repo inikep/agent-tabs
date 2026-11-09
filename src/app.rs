@@ -139,6 +139,9 @@ struct Run {
     interrupted: Option<Vec<usize>>,
     /// The script's round in `rounds`, which each `::send` adds to.
     round: Option<usize>,
+    /// What `all` means: the harnesses checked in the prompt box the script
+    /// was sent from.
+    all: Vec<usize>,
 }
 
 impl Run {
@@ -963,7 +966,7 @@ impl App {
                 false
             }
             Ok(Some(steps)) => {
-                self.start_run(steps);
+                self.start_run(steps, targets.to_vec());
                 self.state_dirty = true;
                 true
             }
@@ -1746,7 +1749,7 @@ impl App {
         harness.model_label(detected)
     }
 
-    fn start_run(&mut self, steps: Vec<Step>) {
+    fn start_run(&mut self, steps: Vec<Step>, all: Vec<usize>) {
         let n = steps.len();
         self.run = Some(Run {
             steps,
@@ -1760,6 +1763,7 @@ impl App {
             pending: Vec::new(),
             interrupted: None,
             round: None,
+            all,
         });
         self.flash(format!("script started: {n} steps"));
         self.tick_run();
@@ -1800,13 +1804,11 @@ impl App {
         self.tick_run();
     }
 
-    /// The harnesses a script's targets mean now: `all` is every harness
-    /// that is not disabled.
+    /// The harnesses a script's targets mean: `all` is those checked in the
+    /// prompt box the script was sent from.
     fn resolve(&self, targets: &Targets) -> Vec<usize> {
         match targets {
-            Targets::All => (0..self.panes.len())
-                .filter(|&i| self.panes[i].status() != Status::Stopped)
-                .collect(),
+            Targets::All => self.run.as_ref().map_or_else(Vec::new, |r| r.all.clone()),
             Targets::Named(names) => names
                 .iter()
                 .filter_map(|n| self.panes.iter().position(|p| p.name() == n))
@@ -2173,6 +2175,7 @@ impl App {
             // A paused script still waits for the same harnesses.
             pending: names(run.interrupted.as_deref().unwrap_or(&run.pending)),
             round: run.round,
+            all: Some(names(&run.all)),
         }
     }
 
@@ -2284,6 +2287,12 @@ impl App {
                 pending: Vec::new(),
                 interrupted: running.then(|| indices(&saved.pending)),
                 round: saved.round.and_then(|i| restored.get(i).copied().flatten()),
+                // Scripts saved before `all` was kept meant every harness that
+                // isn't disabled.
+                all: match saved.all {
+                    Some(names) => indices(&names),
+                    None => self.default_targets(),
+                },
             });
         }
         // The main tab starts on the intro; Ctrl+P shows the last round.
@@ -4039,6 +4048,22 @@ mod tests {
     }
 
     #[test]
+    fn script_all_means_the_checked_harnesses() {
+        let mut app = app_with(vec![cat_harness("a"), cat_harness("b")]);
+        thread::sleep(Duration::from_millis(200));
+        app.main_input.toggle(1);
+        assert_eq!(app.main_input.selected(), [0]);
+        submit_in_main(&mut app, "::send all\nhello\n::wait-done");
+        assert_eq!(app.run.as_ref().unwrap().all, [0]);
+        tick_until(&mut app, "the send to a", |a| {
+            screen(a.pane(0)).contains("got:hello")
+        });
+        tick_until(&mut app, "the end", |a| !a.run.as_ref().unwrap().running());
+        assert!(!screen(app.pane(1)).contains("hello"), "b is not checked");
+        assert_eq!(app.rounds[0].names, ["a"]);
+    }
+
+    #[test]
     fn main_tab_marker_follows_the_script() {
         use unicode_width::UnicodeWidthStr;
         let mut app = app_with(vec![cat_harness("a"), cat_harness("b")]);
@@ -4423,7 +4448,7 @@ mod tests {
         assert!(text.contains("  /review BASE..TARGET [NOTES...]"), "{text}");
         assert!(text.contains("  /plan TARGET TASK..."), "{text}");
         assert!(
-            text.contains("    Every enabled model reviews BASE..TARGET"),
+            text.contains("    Every checked model reviews BASE..TARGET"),
             "the usage isn't repeated: {text}"
         );
         app.handle_event(key(KeyCode::Char('r'), KeyModifiers::CONTROL));

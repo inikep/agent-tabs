@@ -1,10 +1,10 @@
-::# /review BASE..TARGET [NOTES...]: every enabled model reviews BASE..TARGET, the coordinator
+::# /review BASE..TARGET [NOTES...]: every checked model reviews BASE..TARGET, the coordinator
 ::# merges the reviews. NOTES, e.g. "Don't build. extra/libkmip is already checked", go to every
 ::# model after the instructions. REVIEW_DIR comes from [commands.variables] in the config,
 ::# COORDINATOR from [commands] coordinator, and review.md and review-merge.md sit next to this file.
 ::args BASE..TARGET [NOTES...]
 
-::# Every enabled model reviews the branch into its own file
+::# Every checked model reviews the branch into its own file
 ::send all
 OUTPUT_FILE=$REVIEW_DIR/review-$MODEL_ID.md
 Read instructions from $PROMPT_DIR/review.md
