@@ -376,6 +376,9 @@ command's arguments and from the config. There are three so far,
 ::# model after the instructions. REVIEW_DIR comes from [commands.variables] in the config,
 ::# COORDINATOR from [commands] coordinator, and review.md and review-merge.md sit next to this file.
 ::#
+::# The models work from SOURCE_DIR, the git checkout with TARGET, by default the directory
+::# agent-tabs runs in. SOURCE_DIR=/path before NOTES changes it.
+::#
 ::# Example: /review percona/8.4..PS-11925-8.4-bump_libkmip
 ::#
 ::# Example: /review percona/8.4..PS-11925-8.4-bump_libkmip Don't build. extra/libkmip is already checked
@@ -424,6 +427,17 @@ Words after the range are notes for the models, put on the `$NOTES` lines
 after the instructions, e.g. `/review percona/8.4..PS-1 Don't build.
 extra/libkmip is already checked` (quotes around the notes are optional).
 Without notes, those lines are left out.
+
+The models work from `$SOURCE_DIR`, the git checkout with the branch: they
+make their own worktree and build dir next to it (`$SOURCE_DIR-$MODEL_ID`)
+and never change it. It defaults to `$PWD` in `review.md`,
+`review-merge.md` and `implement.md`, which is the directory agent-tabs
+runs in (or `--cwd DIR`). To use another checkout, add `SOURCE_DIR=/path`
+to the command, before any notes, since everything from the first note on
+is part of the notes: `/review percona/8.4..PS-1
+SOURCE_DIR=/work/mysql-server/percona-8.4 Don't build`. It can't be set
+under `[commands.variables]`: a template gets only the variables it uses,
+and only the prompts it points to use `SOURCE_DIR`.
 
 - `::args` lists one word per argument. In a word, each variable name
   matches part of the argument and the rest is matched literally:

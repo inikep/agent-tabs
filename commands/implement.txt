@@ -3,6 +3,9 @@
 ::# next to this file. Both may also be given as BASE_BRANCH=… PLAN=…; NOTES go to every model
 ::# after the instructions.
 ::#
+::# The models work from SOURCE_DIR, the git checkout with BASE_BRANCH, by default the directory
+::# agent-tabs runs in. SOURCE_DIR=/path before NOTES changes it.
+::#
 ::# Example: /implement PS-12000-8.4 /work/LLM-plans/PS-12000/plan-Opus-5.5-high.md
 ::#
 ::# Example: /implement PS-11299-trunk PLAN=/work/LLM-plans/PS-11299-port-vector/plan4-Opus-5.5-high.md

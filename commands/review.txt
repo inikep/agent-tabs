@@ -3,6 +3,9 @@
 ::# model after the instructions. REVIEW_DIR comes from [commands.variables] in the config,
 ::# COORDINATOR from [commands] coordinator, and review.md and review-merge.md sit next to this file.
 ::#
+::# The models work from SOURCE_DIR, the git checkout with TARGET, by default the directory
+::# agent-tabs runs in. SOURCE_DIR=/path before NOTES changes it.
+::#
 ::# Example: /review percona/8.4..PS-11925-8.4-bump_libkmip
 ::#
 ::# Example: /review percona/8.4..PS-11925-8.4-bump_libkmip Don't build. extra/libkmip is already checked
