@@ -1,0 +1,39 @@
+::# /plan TARGET TASK...: every enabled model plans TASK into its own file, then in four more
+::# steps improves its plan using all plans, compares the plans, improves its plan using the
+::# comparisons, and picks the best plan as a base and improves it. PLAN_DIR comes from
+::# [commands.variables] in the config.
+::args TARGET TASK...
+
+::# 1. Every model writes its own plan
+::send all
+OUTPUT_FILE=$PLAN_DIR/plan-$MODEL_ID.md
+In $OUTPUT_FILE create a plan to $TASK
+::wait-model-files $OUTPUT_FILE
+
+::# 2. Every model improves its plan using all plans
+::send all
+PLAN_FILES=$PLAN_DIR/plan-*.md
+OUTPUT_FILE=$PLAN_DIR/plan2-$MODEL_ID.md
+Improve your plan using all plans in $PLAN_FILES and create $OUTPUT_FILE
+::wait-model-files $OUTPUT_FILE
+
+::# 3. Every model compares the improved plans
+::send all
+PLAN_FILES=$PLAN_DIR/plan2-*.md
+OUTPUT_FILE=$PLAN_DIR/compare-$MODEL_ID.md
+Compare correctness of all plans in $PLAN_FILES and create $OUTPUT_FILE
+::wait-model-files $OUTPUT_FILE
+
+::# 4. Every model improves its plan using the comparisons
+::send all
+PLAN_FILES=$PLAN_DIR/compare-*.md
+OUTPUT_FILE=$PLAN_DIR/plan3-$MODEL_ID.md
+Improve your plan basing on $PLAN_FILES and create $OUTPUT_FILE
+::wait-model-files $OUTPUT_FILE
+
+::# 5. Every model picks the best plan as a base and improves it
+::send all
+PLAN_FILES=$PLAN_DIR/plan3-*.md
+OUTPUT_FILE=$PLAN_DIR/plan4-$MODEL_ID.md
+Select best plan from $PLAN_FILES as a base, improve it and create $OUTPUT_FILE
+::wait-model-files $OUTPUT_FILE

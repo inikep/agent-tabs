@@ -143,7 +143,10 @@ to `scrollback` lines of history.
 
 ## Main tab
 
-The first tab is the `main` tab (`Alt+1`), and agent-tabs starts on it.
+The first tab is the `main` tab (`Alt+1`), and agent-tabs starts on it,
+showing what to do and every [command template](#command-templates) with
+its description. That intro is also where `Ctrl+N` goes past the last
+round, and `Ctrl+P` goes from it to the last round.
 The harness tabs follow in config order (`Alt+2` is the first harness).
 Whenever you send a prompt to two or more harnesses, agent-tabs starts a
 *round*:
@@ -226,7 +229,7 @@ the tab's own commands use control keys:
 | typing, `Enter` | Write a prompt and send it to all harnesses |
 | `Ctrl+R` | Take every answer of the round being viewed as it is now (with `compare = true`: summarize now, or re-run the comparison). With no rounds yet, uses what every harness currently shows |
 | `⟳` in a header, `Ctrl+L` | Capture that harness's answer again now (`Ctrl+L`: the focused section) |
-| `Ctrl+P` / `Ctrl+N` | Previous / next round |
+| `Ctrl+P` / `Ctrl+N` | Previous / next round (past the last: the intro with the commands) |
 | `Ctrl+S` | Skip the wait a script is on |
 | `Ctrl+X` | Cancel the running script |
 | `Ctrl+G` | Resume a script paused by a restart |
@@ -252,7 +255,7 @@ BASE=inikep/8.4
 TARGET=PS-11934-8.4-H08
 REVIEW_DIR=/data/sh/LLM/reviews/$TARGET
 OUTPUT_FILE=$REVIEW_DIR/review-$MODEL_ID.md
-Read instructions from /data/sh/LLM/prompts/review.md; the values above replace its placeholders.
+Read instructions from /work/review/agent-tabs/commands/review.md; the values above replace its placeholders.
 ```
 
 agent-tabs works out each harness's file the way a shell would: `$NAME` and
@@ -292,7 +295,7 @@ REVIEW_DIR=/data/sh/LLM/reviews/$TARGET
 ::send all
 BASE=inikep/8.4
 OUTPUT_FILE=$REVIEW_DIR/review-$MODEL_ID.md
-Read instructions from /data/sh/LLM/prompts/review.md
+Read instructions from /work/review/agent-tabs/commands/review.md
 
 ::wait-model-files $OUTPUT_FILE
 
@@ -300,7 +303,7 @@ Read instructions from /data/sh/LLM/prompts/review.md
 ::send opus-5.5
 REVIEW_FILES=$REVIEW_DIR/review-*.md
 REVIEW_COMBINED=$REVIEW_DIR/review-combined.md
-Read instructions from /data/sh/LLM/prompts/review-merge.md
+Read instructions from /work/review/agent-tabs/commands/review-merge.md
 
 ::wait-file $REVIEW_COMBINED
 
@@ -343,7 +346,8 @@ Check if all issues from $REVIEW_COMBINED were fixed in $TARGET
   sections are named by step, e.g. `opus-5.5 · step 2`, and each is taken
   from its own step's prompt and report file. A prompt you send while a
   script runs gets its own round and doesn't supersede the script's. The
-  script's steps are listed above the round: `✓` done, `●` the step it's on
+  script's steps are listed above its round only (and on the intro while it
+  runs): `✓` done, `●` the step it's on
   and what it waits for, `⤼` skipped, `✗` where it was cancelled.
 - The whole script is checked when you press Enter, and nothing is sent if
   something is wrong; the error names the line and the text stays in the box.
@@ -360,19 +364,23 @@ Check if all issues from $REVIEW_COMBINED were fixed in $TARGET
 repository's [`commands/`](commands/), found through the path agent-tabs
 was built from (`dir` under `[commands]` in the config overrides it). A
 template is an ordinary prompt or a script whose values come from the
-command's arguments and from the config. There is one so far,
+command's arguments and from the config. There are three so far,
+[`commands/plan.txt`](commands/plan.txt) and
+[`commands/implement.txt`](commands/implement.txt) (below), and
 [`commands/review.txt`](commands/review.txt):
 
 ```text
-::# /review BASE..TARGET: every enabled model reviews BASE..TARGET, the coordinator merges the reviews.
-::# REVIEW_DIR and PROMPT_DIR come from [commands.variables] in the config, COORDINATOR from
-::# [commands] coordinator.
-::args BASE..TARGET
+::# /review BASE..TARGET [NOTES...]: every enabled model reviews BASE..TARGET, the coordinator
+::# merges the reviews. NOTES, e.g. "Don't build. extra/libkmip is already checked", go to every
+::# model after the instructions. REVIEW_DIR comes from [commands.variables] in the config,
+::# COORDINATOR from [commands] coordinator, and review.md and review-merge.md sit next to this file.
+::args BASE..TARGET [NOTES...]
 
 ::# Every enabled model reviews the branch into its own file
 ::send all
 OUTPUT_FILE=$REVIEW_DIR/review-$MODEL_ID.md
 Read instructions from $PROMPT_DIR/review.md
+$NOTES
 ::wait-model-files $OUTPUT_FILE
 
 ::# The coordinator merges the reviews
@@ -380,6 +388,7 @@ Read instructions from $PROMPT_DIR/review.md
 REVIEW_FILES=$REVIEW_DIR/review-*.md
 REVIEW_COMBINED=$REVIEW_DIR/review-combined.md
 Read instructions from $PROMPT_DIR/review-merge.md
+$NOTES
 ::wait-file $REVIEW_COMBINED
 ```
 
@@ -389,7 +398,6 @@ coordinator = "opus-5.5"   # the default
 
 [commands.variables]
 REVIEW_DIR = "/work/LLM-reviews/$TARGET"
-PROMPT_DIR = "/data/sh/LLM/prompts"
 ```
 
 `/review percona/8.4..PS-11925-8.4-bump_libkmip` then runs the template
@@ -400,25 +408,45 @@ sends:
 BASE=percona/8.4
 TARGET=PS-11925-8.4-bump_libkmip
 REVIEW_DIR=/work/LLM-reviews/$TARGET
-PROMPT_DIR=/data/sh/LLM/prompts
+PROMPT_DIR=/work/review/agent-tabs/commands
 ```
+
+The prompts the templates point to, `review.md`, `review-merge.md` and
+`implement.md`, are in `commands/` too: `$PROMPT_DIR` is that directory
+unless the config or an argument sets it.
+
+Words after the range are notes for the models, put on the `$NOTES` lines
+after the instructions, e.g. `/review percona/8.4..PS-1 Don't build.
+extra/libkmip is already checked` (quotes around the notes are optional).
+Without notes, those lines are left out.
 
 - `::args` lists one word per argument. In a word, each variable name
   matches part of the argument and the rest is matched literally:
   `BASE..TARGET` splits `a..b` at its first `..`.
+- A last word ending in `...` takes the rest of the arguments, so a
+  value can be several words: `::args TARGET TASK...`. In brackets,
+  `[NOTES...]`, it may be left out, and is empty then.
+- A line that is only `$NAME`, for a variable from the arguments or the
+  config, is replaced by its value, or by nothing when it's empty, and a
+  variable used only that way isn't put on top.
 - Arguments written as `NAME=value` set or override any variable, e.g.
-  `/review percona/8.4..PS-1 REVIEW_DIR=/tmp/reviews`.
+  `/review percona/8.4..PS-1 REVIEW_DIR=/tmp/reviews`. An argument whose
+  word is a plain name can be given that way too, in any order:
+  `/implement PLAN=/x.md BASE_BRANCH=PS-1-trunk`.
 - `$COORDINATOR` is the harness that coordinates the others, here the one
   that merges the reviews: `coordinator` under `[commands]`, `opus-5.5` by
   default, or `COORDINATOR=gpt-6` after `/review` for one run. Since the
   script takes harness names as written, agent-tabs fills in variables in
   `::send` and `::wait-done` lines itself.
 - `[commands.variables]` come after the arguments, in the order written,
-  so a value can use `$TARGET` or a variable above it.
+  so a value can use `$TARGET` or a variable above it. A template gets only
+  those it uses, directly or through another variable, so `PLAN_DIR =
+  "/work/LLM-plans/$TARGET"` doesn't get in the way of `/implement`, which
+  has no `TARGET`.
 - A `$NAME` that the template uses and nothing sets (not an argument, the
   config, a `NAME=value` line in the template, `MODEL_ID` or the
-  environment) is an error, so a missing `PROMPT_DIR` isn't sent to the
-  models as `$PROMPT_DIR`.
+  environment) is an error, so a missing `REVIEW_DIR` isn't sent to the
+  models as `$REVIEW_DIR`.
 - The template is read each time you use it, so an edit, or a new file in
   `commands/`, takes effect right away without a rebuild. A mistake in a
   template, such as a `::send` to a harness your config doesn't have, is
@@ -426,6 +454,44 @@ PROMPT_DIR=/data/sh/LLM/prompts
 - `/NAME` without arguments, when its template has an `::args` line, is
   sent to the harnesses as it is, so their own commands (claude's and
   codex's `/review`) still work. So is `/NAME` without a template.
+
+`/plan TARGET TASK...` has every enabled model plan the task in
+`$PLAN_DIR` (`PLAN_DIR = "/work/LLM-plans/$TARGET"` under
+`[commands.variables]`), then improve its plan from all plans, compare the
+improved plans, improve its plan from the comparisons, and finally pick the
+best plan as a base and improve it, each step into its own files:
+`plan-`, `plan2-`, `compare-`, `plan3-` and `plan4-$MODEL_ID.md`.
+`/plan PS-11940-merge-26.10 implement option B` sends, besides any other
+`[commands.variables]`,
+
+```text
+TARGET=PS-11940-merge-26.10
+TASK=implement option B
+PLAN_DIR=/work/LLM-plans/$TARGET
+OUTPUT_FILE=$PLAN_DIR/plan-$MODEL_ID.md
+In $OUTPUT_FILE create a plan to $TASK
+```
+
+and so on.
+
+`/implement BASE_BRANCH PLAN [NOTES...]` has every enabled model create its
+own branch `$BASE_BRANCH-$MODEL_ID` on top of `BASE_BRANCH` and implement the
+plan file there, following [`commands/implement.md`](commands/implement.md).
+That prompt takes the worktree, build dir, cmake options and MTR rules from
+[`commands/review.md`](commands/review.md), with the worktree on the new
+branch instead of detached, and asks for commits with an `Implemented by`
+trailer and a summary (branch and SHA, build, tests, deviations from the
+plan, what's not done) as the final answer. The round is done when every
+model is done, by the usual rules. `/implement PS-11299-trunk
+/work/LLM-plans/PS-11299-port-vector-to-26.07/plan5-Opus-5.5-high.md`, or the
+same with `BASE_BRANCH=` and `PLAN=`, sends
+
+```text
+BASE_BRANCH=PS-11299-trunk
+PLAN=/work/LLM-plans/PS-11299-port-vector-to-26.07/plan5-Opus-5.5-high.md
+PROMPT_DIR=/work/review/agent-tabs/commands
+Read instructions from $PROMPT_DIR/implement.md
+```
 
 ### Restarting
 
@@ -438,6 +504,7 @@ then on.
 
 The harnesses come back as new sessions, so what they were doing is gone:
 
+- The main tab starts on its intro; `Ctrl+P` shows the last round.
 - Answers already captured come back as they were, colors included. A report
   file a round was still waiting for is still watched, and fills its section
   when it's written. An answer that was neither captured nor written to a
@@ -510,7 +577,7 @@ coordinator = "opus-5.5"
 
 [commands.variables]
 REVIEW_DIR = "/work/LLM-reviews/$TARGET"
-PROMPT_DIR = "/data/sh/LLM/prompts"
+PLAN_DIR = "/work/LLM-plans/$TARGET"
 
 [[harness]]
 name = "claude"

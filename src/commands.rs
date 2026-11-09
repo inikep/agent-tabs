@@ -151,6 +151,51 @@ fn is_command(line: &str, name: &str) -> bool {
         .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
 }
 
+/// A template as the main tab lists it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Template {
+    /// `/NAME` and its `::args`, e.g. `/review BASE..TARGET [NOTES...]`.
+    pub usage: String,
+    /// The `::#` lines it starts with, without the `::#`.
+    pub description: Vec<String>,
+}
+
+/// The templates in the commands directory, by name; empty if there is
+/// none or the directory can't be read.
+pub fn list(config: &CommandsConfig) -> Vec<Template> {
+    let Ok(entries) = std::fs::read_dir(config.dir()) else {
+        return Vec::new();
+    };
+    let mut templates: Vec<(String, Template)> = entries
+        .filter_map(|e| {
+            let path = e.ok()?.path();
+            let name = path.file_stem()?.to_str()?.to_string();
+            if path.extension()? != "txt" {
+                return None;
+            }
+            let text = std::fs::read_to_string(&path).ok()?;
+            Some((name.clone(), describe(&name, &text)))
+        })
+        .collect();
+    templates.sort_by(|a, b| a.0.cmp(&b.0));
+    templates.into_iter().map(|(_, t)| t).collect()
+}
+
+fn describe(name: &str, template: &str) -> Template {
+    let args = template
+        .lines()
+        .find(|l| is_args_line(l))
+        .map(|l| l.trim_start()["::args".len()..].trim())
+        .unwrap_or("");
+    let usage = format!("/{name} {args}").trim_end().to_string();
+    let description = template
+        .lines()
+        .map_while(|l| l.trim_start().strip_prefix("::#"))
+        .map(|l| l.strip_prefix(' ').unwrap_or(l).to_string())
+        .collect();
+    Template { usage, description }
+}
+
 fn is_args_line(line: &str) -> bool {
     is_command(line, "args")
 }
@@ -177,11 +222,18 @@ fn arg_pattern(word: &str) -> Result<(Vec<String>, regex::Regex), String> {
     Ok((names, regex::Regex::new(&pattern).expect("escaped pattern")))
 }
 
+fn var_of<'a>(caps: &regex::Captures<'a>) -> &'a str {
+    caps.get(1)
+        .or_else(|| caps.get(2))
+        .expect("a name")
+        .as_str()
+}
+
 /// The first variable `text` uses that is neither in `defined` nor in the
 /// environment.
 fn unset<'a>(text: &'a str, defined: &HashSet<&str>) -> Option<&'a str> {
     VAR.captures_iter(text)
-        .map(|c| c.get(1).or_else(|| c.get(2)).expect("a name").as_str())
+        .map(|c| var_of(&c))
         .find(|v| !defined.contains(v) && std::env::var_os(v).is_none())
 }
 
@@ -216,8 +268,40 @@ fn fill(
     if args.is_empty() && !words.is_empty() {
         return Ok(None);
     }
-    let (named, positional): (Vec<&str>, Vec<&str>) =
-        args.iter().partition(|a| assignment(a).is_some());
+    // A last word `NAME...` takes the rest of the arguments, e.g. a task
+    // in words: `::args TARGET TASK...`; in brackets, `[NOTES...]`, it may
+    // be left out.
+    let last = words.last().map(String::as_str).unwrap_or("");
+    let optional = last.starts_with('[') && last.ends_with(']');
+    let rest = last
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .strip_suffix("...")
+        .filter(|w| NAME.find(w).is_some_and(|m| m.len() == w.len()))
+        .map(str::to_string);
+    // A plain `NAME` word may also be given as `NAME=value`.
+    let fixed: Vec<&String> = words[..words.len() - usize::from(rest.is_some())]
+        .iter()
+        .filter(|word| {
+            !args
+                .iter()
+                .any(|arg| assignment(arg).is_some_and(|(v, _)| v == *word))
+        })
+        .collect();
+    let (mut named, mut positional, mut rest_words) = (Vec::new(), Vec::new(), Vec::new());
+    for &arg in args {
+        let is_named = assignment(arg).is_some();
+        if rest.is_some()
+            && positional.len() == fixed.len()
+            && (!is_named || !rest_words.is_empty())
+        {
+            rest_words.push(arg);
+        } else if is_named {
+            named.push(arg);
+        } else {
+            positional.push(arg);
+        }
+    }
     let usage = || {
         if words.is_empty() {
             format!("/{name} takes no arguments other than NAME=value")
@@ -225,11 +309,11 @@ fn fill(
             format!("usage: /{name} {} [NAME=value…]", words.join(" "))
         }
     };
-    if positional.len() != words.len() {
+    if positional.len() != fixed.len() || (rest.is_some() && !optional && rest_words.is_empty()) {
         return Err(usage());
     }
     let mut set: Vec<(String, String)> = Vec::new();
-    for (word, arg) in words.iter().zip(&positional) {
+    for (word, arg) in fixed.iter().zip(&positional) {
         let (names, pattern) = arg_pattern(word)?;
         let captures = pattern
             .captures(arg)
@@ -238,14 +322,56 @@ fn fill(
             set.push((var, captures[i + 1].to_string()));
         }
     }
+    if let Some(rest) = rest {
+        let value = rest_words.join(" ");
+        // Quotes around the whole text are only there to group it.
+        let value = value
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .map_or(value.clone(), str::to_string);
+        set.push((rest, value));
+    }
     for arg in named {
         let (var, value) = assignment(arg).expect("partitioned by assignment");
         set.push((var.to_string(), value.to_string()));
     }
+    // Only the config variables the template needs, directly or through
+    // another one, so `PLAN_DIR = "…/$TARGET"` doesn't break a template
+    // without TARGET.
+    let mut needed: HashSet<String> = lines
+        .iter()
+        .filter(|l| !l.trim_start().starts_with("::#"))
+        .map(String::as_str)
+        .chain(set.iter().map(|(_, value)| value.as_str()))
+        .flat_map(|text| VAR.captures_iter(text).map(|c| var_of(&c).to_string()))
+        .collect();
+    loop {
+        let more: Vec<String> = config
+            .variables
+            .iter()
+            .filter(|(var, _)| needed.contains(var.as_str()))
+            .flat_map(|(_, value)| VAR.captures_iter(value).map(|c| var_of(&c).to_string()))
+            .filter(|var| !needed.contains(var))
+            .collect();
+        if more.is_empty() {
+            break;
+        }
+        needed.extend(more);
+    }
     for (var, value) in &config.variables {
-        if !set.iter().any(|(v, _)| v == var) {
+        if needed.contains(var.as_str()) && !set.iter().any(|(v, _)| v == var) {
             set.push((var.clone(), value.clone()));
         }
+    }
+    // The prompts the templates point to, such as review.md, sit next to them.
+    let uses = |var: &str| {
+        lines
+            .iter()
+            .filter(|l| !l.trim_start().starts_with("::#"))
+            .any(|l| VAR.captures_iter(l).any(|c| var_of(&c) == var))
+    };
+    if !set.iter().any(|(v, _)| v == "PROMPT_DIR") && uses("PROMPT_DIR") {
+        set.push(("PROMPT_DIR".into(), config.dir().display().to_string()));
     }
     if let Some(at) = spec_at {
         lines[at] = format!("::# {}", lines[at].trim());
@@ -299,6 +425,32 @@ fn fill(
         }
     }
 
+    // A line that is only `$NAME`, for a variable set above, becomes its
+    // value, or an empty line; one used only so isn't put on top.
+    let mut inlined = HashSet::new();
+    for line in &mut lines {
+        let whole = VAR
+            .captures(line.trim())
+            .filter(|c| c[0].len() == line.trim().len())
+            .map(|c| var_of(&c).to_string());
+        if let Some((var, value)) = whole.and_then(|w| set.iter().find(|(v, _)| *v == w)) {
+            inlined.insert(var.clone());
+            *line = value.clone();
+        }
+    }
+    let used = |var: &str| {
+        lines
+            .iter()
+            .filter(|l| !l.trim_start().starts_with("::#"))
+            .chain(set.iter().map(|(_, value)| value))
+            .any(|text| VAR.captures_iter(text).any(|c| var_of(&c) == var))
+    };
+    let set: Vec<(String, String)> = set
+        .iter()
+        .filter(|(var, _)| !inlined.contains(var) || used(var))
+        .cloned()
+        .collect();
+
     let added = set.len();
     let text = set
         .into_iter()
@@ -332,6 +484,28 @@ mod tests {
 
     fn fill_review(args: &[&str]) -> Result<Option<String>, String> {
         fill(REVIEW, "review", args, &config()).map(|t| t.map(|(text, _)| text))
+    }
+
+    #[test]
+    fn the_prompts_are_next_to_the_templates_unless_the_config_says_otherwise() {
+        let config = CommandsConfig {
+            dir: Some("/t".into()),
+            ..with_variables(&[("REVIEW_DIR", "/r")])
+        };
+        let (text, _) = fill(REVIEW, "review", &["a..b"], &config).unwrap().unwrap();
+        assert!(
+            text.starts_with("BASE=a\nTARGET=b\nREVIEW_DIR=/r\nPROMPT_DIR=/t\n::#"),
+            "{text}"
+        );
+        assert!(CommandsConfig::default().dir().join("review.md").exists());
+        assert!(
+            CommandsConfig::default()
+                .dir()
+                .join("review-merge.md")
+                .exists()
+        );
+        let (text, _) = fill("::send all\nhi", "hi", &[], &config).unwrap().unwrap();
+        assert!(!text.contains("PROMPT_DIR"), "only when used: {text}");
     }
 
     #[test]
@@ -426,6 +600,166 @@ mod tests {
     }
 
     #[test]
+    fn a_last_word_with_dots_takes_the_rest() {
+        const PLAN: &str = include_str!("../commands/plan.txt");
+        let config = with_variables(&[("PLAN_DIR", "/p/$TARGET")]);
+        let fill_plan = |args: &[&str]| fill(PLAN, "plan", args, &config);
+        let (text, added) = fill_plan(&["PS-1", "PLAN_DIR=/x", "implement", "option", "B"])
+            .unwrap()
+            .unwrap();
+        assert!(
+            text.starts_with("TARGET=PS-1\nTASK=implement option B\nPLAN_DIR=/x\n"),
+            "{text}"
+        );
+        assert_eq!(added, 3);
+        let steps = parse(&text, &["opus-5.5"]).unwrap().unwrap();
+        assert_eq!(steps.len(), 10);
+        let Command::Send { text, .. } = &steps[0].command else {
+            panic!("{steps:?}");
+        };
+        assert!(
+            text.ends_with("In $OUTPUT_FILE create a plan to $TASK"),
+            "{text}"
+        );
+        assert_eq!(steps[9].command.path(Some("M")).unwrap(), "/x/plan4-M.md");
+        let (text, _) = fill_plan(&["PS-1", "use", "X=1"]).unwrap().unwrap();
+        assert!(text.contains("\nTASK=use X=1\n"), "{text}");
+        let usage = "usage: /plan TARGET TASK... [NAME=value…]";
+        assert_eq!(fill_plan(&["PS-1"]), Err(usage.into()));
+        assert_eq!(fill_plan(&["PS-1", "A=1"]), Err(usage.into()));
+        assert_eq!(fill_plan(&[]), Ok(None));
+    }
+
+    #[test]
+    fn implement_takes_its_arguments_by_position_or_by_name() {
+        const IMPLEMENT: &str = include_str!("../commands/implement.txt");
+        let config = with_variables(&[("PROMPT_DIR", "/p")]);
+        let fill_implement = |args: &[&str]| {
+            fill(IMPLEMENT, "implement", args, &config).map(|t| t.map(|(text, _)| text))
+        };
+        let by_position = fill_implement(&["PS-1-trunk", "/plans/plan5.md"])
+            .unwrap()
+            .unwrap();
+        let by_name = fill_implement(&["BASE_BRANCH=PS-1-trunk", "PLAN=/plans/plan5.md"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(by_position, by_name);
+        assert!(
+            by_name.starts_with("BASE_BRANCH=PS-1-trunk\nPLAN=/plans/plan5.md\nPROMPT_DIR=/p\n::#"),
+            "{by_name}"
+        );
+        let steps = parse(&by_name, &["opus-5.5"]).unwrap().unwrap();
+        assert_eq!(steps.len(), 2);
+        let Command::Send { targets, text } = &steps[0].command else {
+            panic!("{steps:?}");
+        };
+        assert_eq!(targets, &Targets::All);
+        assert!(
+            text.ends_with("\nRead instructions from $PROMPT_DIR/implement.md"),
+            "{text}"
+        );
+        assert!(
+            CommandsConfig::default()
+                .dir()
+                .join("implement.md")
+                .exists()
+        );
+        assert_eq!(steps[1].command, Command::WaitDone { targets: None });
+
+        let text = fill_implement(&["PLAN=/x.md", "PS-1-trunk", "Don't", "build"])
+            .unwrap()
+            .unwrap();
+        assert!(
+            text.starts_with("BASE_BRANCH=PS-1-trunk\nPLAN=/x.md\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("implement.md\nDon't build\n::wait-done"),
+            "{text}"
+        );
+        assert_eq!(
+            fill_implement(&["PLAN=/x.md"]),
+            Err("usage: /implement BASE_BRANCH PLAN [NOTES...] [NAME=value…]".into())
+        );
+    }
+
+    #[test]
+    fn config_variables_a_template_doesnt_use_are_left_out() {
+        const IMPLEMENT: &str = include_str!("../commands/implement.txt");
+        let config = with_variables(&[
+            ("REVIEW_DIR", "/r/$TARGET"),
+            ("PLAN_DIR", "/p/$TARGET"),
+            ("SUB", "$PLAN_DIR/sub"),
+        ]);
+        let (text, _) = fill(IMPLEMENT, "implement", &["PS-1-trunk", "/x.md"], &config)
+            .unwrap()
+            .unwrap();
+        assert!(
+            !text.contains("REVIEW_DIR") && !text.contains("PLAN_DIR"),
+            "{text}"
+        );
+        let (text, _) = fill("::send all\nsee $SUB", "t", &["TARGET=PS-1"], &config)
+            .unwrap()
+            .unwrap();
+        assert!(
+            text.starts_with("TARGET=PS-1\nPLAN_DIR=/p/$TARGET\nSUB=$PLAN_DIR/sub\n::send"),
+            "only what $SUB needs: {text}"
+        );
+    }
+
+    #[test]
+    fn review_notes_follow_the_instructions_or_are_left_out() {
+        let steps = |text: &str| -> Vec<String> {
+            parse(text, &["opus-5.5"])
+                .unwrap()
+                .unwrap()
+                .into_iter()
+                .filter_map(|s| match s.command {
+                    Command::Send { text, .. } => Some(text),
+                    _ => None,
+                })
+                .collect()
+        };
+        let text = fill_review(&["a..b", "Don't", "build.", "extra/libkmip", "is", "checked"])
+            .unwrap()
+            .unwrap();
+        let sends = steps(&text);
+        assert!(
+            sends[0].ends_with(
+                "Read instructions from $PROMPT_DIR/review.md\nDon't build. extra/libkmip is checked"
+            ),
+            "{}",
+            sends[0]
+        );
+        assert!(
+            sends[1].ends_with("review-merge.md\nDon't build. extra/libkmip is checked"),
+            "{}",
+            sends[1]
+        );
+        assert!(!text.contains("NOTES="), "the notes are inlined: {text}");
+
+        let text = fill_review(&["a..b"]).unwrap().unwrap();
+        let sends = steps(&text);
+        assert!(sends[0].ends_with("$PROMPT_DIR/review.md"), "{}", sends[0]);
+        assert!(
+            !text.contains("NOTES=") && !text.contains("$NOTES"),
+            "{text}"
+        );
+        assert_eq!(text.lines().count(), REVIEW.lines().count() + 4);
+
+        let text = fill_review(&["a..b", "\"Don't", "build\""])
+            .unwrap()
+            .unwrap();
+        assert!(text.contains("\nDon't build\n"), "{text}");
+        assert_eq!(
+            fill_review(&["a"]),
+            Err(
+                "a isn't BASE..TARGET; usage: /review BASE..TARGET [NOTES...] [NAME=value…]".into()
+            )
+        );
+    }
+
+    #[test]
     fn a_range_splits_at_its_first_dots() {
         let text = fill_review(&["a..b..c"]).unwrap().unwrap();
         assert!(text.starts_with("BASE=a\nTARGET=b..c\n"), "{text}");
@@ -443,10 +777,9 @@ mod tests {
 
     #[test]
     fn reports_unset_variables() {
-        let vars = with_variables(&[("REVIEW_DIR", "/r/$TARGET")]);
-        let err = fill(REVIEW, "review", &["a..b"], &vars).unwrap_err();
+        let err = fill(REVIEW, "review", &["a..b"], &with_variables(&[])).unwrap_err();
         assert!(
-            err.starts_with("line 9: $PROMPT_DIR is not set; set it under [commands.variables]"),
+            err.starts_with("line 9: $REVIEW_DIR is not set; set it under [commands.variables]"),
             "{err}"
         );
         let vars = with_variables(&[("REVIEW_DIR", "$NO_ROOT_X/$TARGET")]);
@@ -459,9 +792,17 @@ mod tests {
 
     #[test]
     fn reports_wrong_arguments_and_templates() {
-        let usage = "usage: /review BASE..TARGET [NAME=value…]";
-        assert_eq!(fill_review(&["a..b", "c"]), Err(usage.into()));
+        let usage = "usage: /review BASE..TARGET [NOTES...] [NAME=value…]";
         assert_eq!(fill_review(&["REVIEW_DIR=/x"]), Err(usage.into()));
+        assert_eq!(
+            fill(
+                "::args A\n::send all\nhi $A",
+                "hi",
+                &["x", "y"],
+                &with_variables(&[])
+            ),
+            Err("usage: /hi A [NAME=value…]".into())
+        );
         assert_eq!(
             fill_review(&["..b"]),
             Err(format!("..b isn't BASE..TARGET; {usage}"))
@@ -518,6 +859,36 @@ mod tests {
         );
         assert!(CommandsConfig::default().dir().join("review.txt").exists());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn lists_the_templates_with_their_usage_and_comments() {
+        let names: Vec<String> = list(&CommandsConfig::default())
+            .into_iter()
+            .map(|t| t.usage)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "/implement BASE_BRANCH PLAN [NOTES...]",
+                "/plan TARGET TASK...",
+                "/review BASE..TARGET [NOTES...]"
+            ]
+        );
+        let review = describe("review", REVIEW);
+        assert!(
+            review.description[0]
+                .starts_with("/review BASE..TARGET [NOTES...]: every enabled model"),
+            "{review:?}"
+        );
+        assert_eq!(review.description.len(), 4);
+        assert_eq!(
+            describe("hi", "Say hi"),
+            Template {
+                usage: "/hi".into(),
+                description: Vec::new()
+            }
+        );
     }
 
     #[test]

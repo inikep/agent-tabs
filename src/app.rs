@@ -66,7 +66,11 @@ pub struct App {
     pending: Vec<(usize, String)>,
     dialogs: regex::RegexSet,
     rounds: Vec<Round>,
+    /// The round the main tab shows; `rounds.len()` shows the intro, with
+    /// the command templates.
     main_view: usize,
+    /// The command templates the intro lists, and when they were read.
+    templates: std::cell::RefCell<Option<(Instant, Vec<crate::commands::Template>)>>,
     main_focus: usize,
     main_folded: Vec<bool>,
     main_hits: Vec<Option<usize>>,
@@ -448,6 +452,7 @@ impl App {
             model_patterns: Vec::new(),
             target_hits: std::cell::RefCell::new(Vec::new()),
             prompt_widths: std::cell::RefCell::new(std::collections::HashMap::new()),
+            templates: std::cell::RefCell::new(None),
             exit_span: (0, 0),
             quit: false,
             run: None,
@@ -696,6 +701,14 @@ impl App {
 
     fn select(&mut self, index: usize) {
         if index <= self.main_tab() {
+            // Scrolling belongs to the tab being left, and the main tab has
+            // no pane to scroll (a click on a tab switches in any mode).
+            if index != self.active && self.mode == Mode::Scroll {
+                if let Some(pane) = self.panes.get(self.active) {
+                    pane.scroll(Scroll::Bottom);
+                }
+                self.mode = Mode::Normal;
+            }
             self.active = index;
             if self.on_main() {
                 self.main_unseen = false;
@@ -1230,7 +1243,7 @@ impl App {
 
         if self.on_main() {
             let input_cursor = self.draw_main(frame, pane_area);
-            frame.render_widget(Paragraph::new(self.status_line()), status_area);
+            self.draw_status(frame, status_area);
             let cursor = match self.mode {
                 Mode::Normal => input_cursor,
                 Mode::Compose => self.draw_composer(frame, pane_area),
@@ -1292,7 +1305,7 @@ impl App {
             cursor
         };
 
-        frame.render_widget(Paragraph::new(self.status_line()), status_area);
+        self.draw_status(frame, status_area);
 
         let mut final_cursor = if self.mode == Mode::Normal {
             cursor
@@ -1307,6 +1320,39 @@ impl App {
         if let Some(pos) = final_cursor {
             frame.set_cursor_position(pos);
         }
+    }
+
+    /// The status line, and above it, an error too long for that line in
+    /// full, so it isn't cut off.
+    fn draw_status(&self, frame: &mut Frame, status_area: Rect) {
+        let line = self.status_line();
+        let cut = line.width() > usize::from(status_area.width);
+        frame.render_widget(Paragraph::new(line), status_area);
+        let Some((text, _, true)) = &self.message else {
+            return;
+        };
+        if !cut || self.flash_span().is_none() {
+            return;
+        }
+        let width = usize::from(status_area.width.max(1));
+        let mut lines = vec![String::new()];
+        for c in text.chars() {
+            let last = lines.last_mut().expect("never empty");
+            if last.width() + c.to_string().width() > width {
+                lines.push(String::new());
+            }
+            lines.last_mut().expect("never empty").push(c);
+        }
+        let height = (lines.len() as u16).min(status_area.y);
+        let error = Paragraph::new(lines.into_iter().map(Line::from).collect::<Vec<_>>()).red();
+        let area = Rect::new(
+            status_area.x,
+            status_area.y - height,
+            status_area.width,
+            height,
+        );
+        frame.render_widget(Clear, area);
+        frame.render_widget(error, area);
     }
 
     fn status_line(&self) -> Line<'static> {
@@ -2240,10 +2286,9 @@ impl App {
                 round: saved.round.and_then(|i| restored.get(i).copied().flatten()),
             });
         }
-        if let Some(last) = self.rounds.len().checked_sub(1) {
-            self.main_folded.clear();
-            self.view_round(last);
-        }
+        // The main tab starts on the intro; Ctrl+P shows the last round.
+        self.main_folded.clear();
+        self.view_round(self.rounds.len());
         let rounds = self.rounds.len();
         if paused {
             self.flash(format!(
@@ -2500,14 +2545,16 @@ impl App {
     }
 
     fn on_main_key(&mut self, key: KeyEvent) {
-        let last = self.rounds.len().saturating_sub(1);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let page = self.pane_size.rows / 2;
         let sections = self.main_sections();
         match key.code {
             KeyCode::Char('r') if ctrl => self.refresh_round(),
             KeyCode::Char('p') if ctrl => self.view_round(self.main_view.saturating_sub(1)),
-            KeyCode::Char('n') if ctrl => self.view_round((self.main_view + 1).min(last)),
+            // Past the last round is the intro.
+            KeyCode::Char('n') if ctrl => {
+                self.view_round((self.main_view + 1).min(self.rounds.len()))
+            }
             KeyCode::Char('x') if ctrl => self.cancel_run(),
             KeyCode::Char('g') if ctrl => self.resume_run(),
             KeyCode::Char('s') if ctrl => self.skip_wait(),
@@ -2706,37 +2753,114 @@ impl App {
     }
 
     fn main_lines(&self) -> Vec<(Line<'static>, Option<usize>)> {
-        let mut lines: Vec<(Line<'static>, Option<usize>)> =
-            self.run_lines().into_iter().map(|l| (l, None)).collect();
+        let mut lines: Vec<(Line<'static>, Option<usize>)> = Vec::new();
+        if self.shows_run() {
+            lines.extend(self.run_lines().into_iter().map(|l| (l, None)));
+        }
         lines.extend(self.round_lines());
+        lines
+    }
+
+    /// Whether the main tab shows the script's steps: above the script's
+    /// round, and on the intro while it runs (or is paused by a restart) or
+    /// when its round is unknown.
+    fn shows_run(&self) -> bool {
+        let Some(run) = &self.run else {
+            return false;
+        };
+        let on_intro = self.main_view >= self.rounds.len();
+        match run.round {
+            Some(round) => round == self.main_view || (on_intro && run.running()),
+            None => on_intro || run.running(),
+        }
+    }
+
+    /// The main tab without a round: what to do, and the command templates.
+    fn intro_lines(&self) -> Vec<Line<'static>> {
+        let rounds = self.rounds.len();
+        let mut lines = vec![
+            Line::from(match rounds {
+                0 => "No rounds yet.".to_string(),
+                1 => "1 round so far; Ctrl+P shows it.".to_string(),
+                n => format!(
+                    "{n} rounds so far; Ctrl+P shows the last, Ctrl+P / Ctrl+N step through them."
+                ),
+            })
+            .bold(),
+            Line::from(""),
+            Line::from(
+                "Type a prompt in the box below and press Enter to send it to every harness.",
+            ),
+            Line::from(if self.config.main.compare {
+                format!(
+                    "Each harness's own answer appears here as soon as it's done, and all answers are compared by `{}` once every harness has been quiet for {}s.",
+                    self.config.main.command_line(),
+                    self.config.main.quiet_secs
+                )
+            } else {
+                "Each harness's own answer appears here as soon as it's done.".to_string()
+            }),
+            Line::from(if self.config.main.compare {
+                "Press Ctrl+R to compare what the harnesses show right now."
+            } else {
+                "Press Ctrl+R to capture what the harnesses show right now."
+            }),
+            Line::from(
+                "A prompt with ::send, ::wait-model-files, ::wait-file or ::wait-done lines runs as a script.",
+            ),
+            Line::from("Ctrl+\\ ? shows every key.").dark_gray(),
+            Line::from(""),
+            Line::from("Commands").bold(),
+        ];
+        let mut cache = self.templates.borrow_mut();
+        // Read again now and then, so a new or edited template shows up.
+        if cache
+            .as_ref()
+            .is_none_or(|(at, _)| at.elapsed() >= Duration::from_secs(2))
+        {
+            *cache = Some((Instant::now(), crate::commands::list(&self.config.commands)));
+        }
+        let templates = &cache.as_ref().expect("filled above").1;
+        if templates.is_empty() {
+            lines.push(Line::from(format!(
+                "  No templates in {}.",
+                self.config.commands.dir().display()
+            )));
+        }
+        for template in templates {
+            lines.push(Line::from(""));
+            lines.push(Line::from(format!("  {}", template.usage)).bold());
+            // One paragraph per run of comment lines, wrapped to the tab;
+            // the first usually repeats the usage before its ": ".
+            let text = template.description.join("\n");
+            let text = text
+                .strip_prefix(&template.usage)
+                .and_then(|rest| rest.strip_prefix(':'))
+                .unwrap_or(&text);
+            for paragraph in text.split("\n\n") {
+                let paragraph = paragraph.split_whitespace().collect::<Vec<_>>().join(" ");
+                let mut chars = paragraph.chars();
+                if let Some(first) = chars.next() {
+                    let rest: String = chars.collect();
+                    lines.push(Line::from(format!("    {}{rest}", first.to_uppercase())));
+                }
+            }
+        }
+        lines.push(Line::from(""));
+        lines.push(
+            Line::from(format!(
+                "Templates are read from {}; /NAME without its arguments goes to the harnesses as their own command.",
+                self.config.commands.dir().display()
+            ))
+            .dark_gray(),
+        );
         lines
     }
 
     fn round_lines(&self) -> Vec<(Line<'static>, Option<usize>)> {
         let plain = |lines: Vec<Line<'static>>| lines.into_iter().map(|l| (l, None)).collect();
         let Some(round) = self.rounds.get(self.main_view) else {
-            return plain(vec![
-                Line::from("No summaries yet.").bold(),
-                Line::from(""),
-                Line::from(
-                    "Type a prompt in the box below and press Enter to send it to every harness.",
-                ),
-                Line::from(if self.config.main.compare {
-                    format!(
-                        "Each harness's own answer appears here as soon as it's done, and all answers are compared by `{}` once every harness has been quiet for {}s.",
-                        self.config.main.command_line(),
-                        self.config.main.quiet_secs
-                    )
-                } else {
-                    "Each harness's own answer appears here as soon as it's done.".to_string()
-                }),
-                Line::from(""),
-                Line::from(if self.config.main.compare {
-                    "Press Ctrl+R to compare what the harnesses show right now."
-                } else {
-                    "Press Ctrl+R to capture what the harnesses show right now."
-                }),
-            ]);
+            return plain(self.intro_lines());
         };
         let mut lines: Vec<(Line<'static>, Option<usize>)> = plain(vec![
             Line::from(vec![
@@ -3990,6 +4114,11 @@ mod tests {
         assert!(text.contains("Script paused by a restart"), "{text}");
         assert!(text.contains("again to b and resumes"), "{text}");
         assert_eq!(second.main_tab_label().0, "?main");
+        assert!(text.contains("1 round so far; Ctrl+P shows it"), "{text}");
+        second.handle_event(key(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert!(main_text(&second).contains("Round 1 of 1"));
+        second.handle_event(key(KeyCode::Char('n'), KeyModifiers::CONTROL));
+        assert!(main_text(&second).contains("1 round so far"));
         thread::sleep(Duration::from_millis(200));
         assert!(!second.tick_run(), "paused until Ctrl+G");
 
@@ -4043,7 +4172,7 @@ mod tests {
         assert_eq!(app.main_input.text(), "/review percona/8.4..PS-1");
         let message = &app.message.as_ref().unwrap().0;
         assert!(
-            message.contains("commands/review.txt: line 13: unknown target opus-5.5"),
+            message.contains("commands/review.txt: line 15: unknown target opus-5.5"),
             "{message}"
         );
 
@@ -4052,9 +4181,19 @@ mod tests {
         submit_in_main(&mut app, "/review percona/8.4..PS-1");
         let message = &app.message.as_ref().unwrap().0;
         assert!(
-            message.contains("commands/review.txt: line 8: $REVIEW_DIR is not set"),
+            message.contains("commands/review.txt: line 9: $REVIEW_DIR is not set"),
             "{message}"
         );
+    }
+
+    #[test]
+    fn a_long_error_is_shown_in_full() {
+        let mut app = app_with(vec![cat_harness("a"), cat_harness("b")]);
+        let error = format!("{}: the end", "x".repeat(150));
+        app.flash_error(error.clone());
+        let rows = buffer_rows(&draw_app(&mut app, 60, 20));
+        let shown: String = rows[16..19].concat();
+        assert_eq!(shown.trim_end(), error, "{rows:#?}");
     }
 
     fn test_review_variables() -> indexmap::IndexMap<String, String> {
@@ -4135,6 +4274,29 @@ mod tests {
             "meanwhile keeps its own round"
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn script_steps_show_only_above_the_scripts_round() {
+        let mut app = app_with(vec![cat_harness("a"), cat_harness("b")]);
+        thread::sleep(Duration::from_millis(200));
+        submit_in_main(&mut app, "::send a b\nhello");
+        tick_until(&mut app, "the script", |a| {
+            !a.run.as_ref().unwrap().running()
+        });
+        assert!(main_text(&app).contains("Script finished"));
+        submit_in_main(&mut app, "a prompt of my own");
+        assert_eq!(app.main_view, 1);
+        assert!(!main_text(&app).contains("Script"), "{}", main_text(&app));
+        app.handle_event(key(KeyCode::Char('n'), KeyModifiers::CONTROL));
+        assert!(
+            !main_text(&app).contains("Script"),
+            "not on the intro once finished"
+        );
+        app.handle_event(key(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        app.handle_event(key(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert_eq!(app.main_view, 0);
+        assert!(main_text(&app).contains("Script finished"));
     }
 
     #[test]
@@ -4256,7 +4418,14 @@ mod tests {
         thread::sleep(Duration::from_millis(200));
         app.handle_event(key(KeyCode::Char('1'), KeyModifiers::ALT));
         assert!(app.on_main());
-        assert!(main_text(&app).contains("No summaries yet"));
+        let text = main_text(&app);
+        assert!(text.contains("No rounds yet"), "{text}");
+        assert!(text.contains("  /review BASE..TARGET [NOTES...]"), "{text}");
+        assert!(text.contains("  /plan TARGET TASK..."), "{text}");
+        assert!(
+            text.contains("    Every enabled model reviews BASE..TARGET"),
+            "the usage isn't repeated: {text}"
+        );
         app.handle_event(key(KeyCode::Char('r'), KeyModifiers::CONTROL));
         wait_main(&mut app, "SUMMARY:2");
     }
@@ -4605,5 +4774,21 @@ mod tests {
         let log = std::fs::read_to_string(dir.join("prompts.log")).unwrap();
         assert!(log.contains("-> a\nlogged"), "{log}");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn switching_tabs_leaves_scroll_mode() {
+        let mut app = app_with(vec![cat_harness("a"), cat_harness("b")]);
+        thread::sleep(Duration::from_millis(300));
+        app.select(0);
+        app.handle_event(key(KeyCode::Char('\\'), KeyModifiers::CONTROL));
+        app.handle_event(key(KeyCode::Char('['), KeyModifiers::NONE));
+        assert_eq!(app.mode(), Mode::Scroll);
+        // As a click on the main tab's label in the tab bar does.
+        app.select_position(0);
+        assert!(app.on_main());
+        assert_eq!(app.mode(), Mode::Normal);
+        app.handle_event(key(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(app.main_input.text(), "x");
     }
 }
