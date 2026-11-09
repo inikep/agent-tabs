@@ -2,6 +2,10 @@
 ::# steps improves its plan using all plans, compares the plans, improves its plan using the
 ::# comparisons, and picks the best plan as a base and improves it. PLAN_DIR comes from
 ::# [commands.variables] in the config.
+::#
+::# Example: /plan PS-12000 implement https://perconadev.atlassian.net/browse/PS-12000
+::#
+::# Example: /plan PS-11940-merge-26.10 implement option B PLAN_DIR=/tmp/plans
 ::args TARGET TASK...
 
 ::# 1. Every model writes its own plan

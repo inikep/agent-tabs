@@ -2,6 +2,10 @@
 ::# merges the reviews. NOTES, e.g. "Don't build. extra/libkmip is already checked", go to every
 ::# model after the instructions. REVIEW_DIR comes from [commands.variables] in the config,
 ::# COORDINATOR from [commands] coordinator, and review.md and review-merge.md sit next to this file.
+::#
+::# Example: /review percona/8.4..PS-11925-8.4-bump_libkmip
+::#
+::# Example: /review percona/8.4..PS-11925-8.4-bump_libkmip Don't build. extra/libkmip is already checked
 ::args BASE..TARGET [NOTES...]
 
 ::# Every checked model reviews the branch into its own file

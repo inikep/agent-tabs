@@ -644,6 +644,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(by_position, by_name);
+        let mixed = fill_implement(&["PS-1-trunk", "PLAN=/plans/plan5.md"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(mixed, by_name);
         assert!(
             by_name.starts_with("BASE_BRANCH=PS-1-trunk\nPLAN=/plans/plan5.md\nPROMPT_DIR=/p\n::#"),
             "{by_name}"
@@ -779,7 +783,7 @@ mod tests {
     fn reports_unset_variables() {
         let err = fill(REVIEW, "review", &["a..b"], &with_variables(&[])).unwrap_err();
         assert!(
-            err.starts_with("line 9: $REVIEW_DIR is not set; set it under [commands.variables]"),
+            err.starts_with("line 13: $REVIEW_DIR is not set; set it under [commands.variables]"),
             "{err}"
         );
         let vars = with_variables(&[("REVIEW_DIR", "$NO_ROOT_X/$TARGET")]);
@@ -881,7 +885,7 @@ mod tests {
                 .starts_with("/review BASE..TARGET [NOTES...]: every checked model"),
             "{review:?}"
         );
-        assert_eq!(review.description.len(), 4);
+        assert_eq!(review.description.len(), 8);
         assert_eq!(
             describe("hi", "Say hi"),
             Template {
