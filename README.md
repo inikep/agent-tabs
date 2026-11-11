@@ -419,8 +419,9 @@ REVIEW_DIR=/work/LLM-reviews/$TARGET
 PROMPT_DIR=/work/review/agent-tabs/commands
 ```
 
-The prompts the templates point to, `review.md`, `review-merge.md` and
-`implement.md`, are in `commands/` too: `$PROMPT_DIR` is that directory
+The prompts the templates point to, `review.md`, `review-merge.md`,
+`implement.md`, `implement-compare.md` and `implement-improve.md`, are in
+`commands/` too: `$PROMPT_DIR` is that directory
 unless the config or an argument sets it.
 
 Words after the range are notes for the models, put on the `$NOTES` lines
@@ -430,8 +431,8 @@ Without notes, those lines are left out.
 
 The models work from `$SOURCE_DIR`, the git checkout with the branch: they
 make their own worktree and build dir next to it (`$SOURCE_DIR-$MODEL_ID`)
-and never change it. It defaults to `$PWD` in `review.md`,
-`review-merge.md` and `implement.md`, which is the directory agent-tabs
+and never change it. It defaults to `$PWD` in each of those
+prompts, which is the directory agent-tabs
 runs in (or `--cwd DIR`). To use another checkout, add `SOURCE_DIR=/path`
 to the command, before any notes, since everything from the first note on
 is part of the notes: `/review percona/8.4..PS-1
@@ -493,22 +494,39 @@ In $OUTPUT_FILE create a plan to $TASK
 
 and so on.
 
-`/implement BASE_BRANCH PLAN [NOTES...]` has every checked model create its
-own branch `$BASE_BRANCH-$MODEL_ID` on top of `BASE_BRANCH` and implement the
-plan file there, following [`commands/implement.md`](commands/implement.md).
-That prompt takes the worktree, build dir, cmake options and MTR rules from
-[`commands/review.md`](commands/review.md), with the worktree on the new
-branch instead of detached, and asks for commits with an `Implemented by`
-trailer and a summary (branch and SHA, build, tests, deviations from the
-plan, what's not done) as the final answer. The round is done when every
-model is done, by the usual rules. `/implement PS-11299-trunk
+`/implement BASE_BRANCH PLAN [NOTES...]` runs in three steps, with its
+files in `$IMPLEMENT_DIR` (`IMPLEMENT_DIR =
+"/work/LLM-implementations/$BASE_BRANCH"` under `[commands.variables]`):
+
+1. Every checked model creates its own branch `$BASE_BRANCH-$MODEL_ID` on top
+   of `BASE_BRANCH` and implements the plan file there, following
+   [`commands/implement.md`](commands/implement.md). That prompt takes the
+   worktree, build dir, cmake options and MTR rules from
+   [`commands/review.md`](commands/review.md), with the worktree on the new
+   branch instead of detached, and asks for commits with an `Implemented by`
+   trailer and a summary (branch and SHA, build, tests, deviations from the
+   plan, what's not done) in `implement-$MODEL_ID.md`.
+2. The coordinator compares the branches, following
+   [`commands/implement-compare.md`](commands/implement-compare.md): plan
+   coverage, bugs, tests and code of each, which branch is the best base, and
+   what to change in it, in `compare.md`.
+3. The coordinator creates `$BASE_BRANCH-final` on the best branch, in its
+   own worktree and build dir from step 1 (its own branch stays as it is),
+   and makes the changes from the comparison, following
+   [`commands/implement-improve.md`](commands/implement-improve.md), adding an
+   `Improved by` trailer to each commit it changes, with its summary in
+   `final.md`.
+
+`/implement PS-11299-trunk
 /work/LLM-plans/PS-11299-port-vector-to-26.07/plan5-Opus-5.5-high.md`, or the
-same with `BASE_BRANCH=` and `PLAN=`, sends
+same with `BASE_BRANCH=` and `PLAN=`, sends to every checked model
 
 ```text
 BASE_BRANCH=PS-11299-trunk
 PLAN=/work/LLM-plans/PS-11299-port-vector-to-26.07/plan5-Opus-5.5-high.md
+IMPLEMENT_DIR=/work/LLM-implementations/$BASE_BRANCH
 PROMPT_DIR=/work/review/agent-tabs/commands
+OUTPUT_FILE=$IMPLEMENT_DIR/implement-$MODEL_ID.md
 Read instructions from $PROMPT_DIR/implement.md
 ```
 
@@ -597,6 +615,7 @@ coordinator = "opus-5.5"
 [commands.variables]
 REVIEW_DIR = "/work/LLM-reviews/$TARGET"
 PLAN_DIR = "/work/LLM-plans/$TARGET"
+IMPLEMENT_DIR = "/work/LLM-implementations/$BASE_BRANCH"
 
 [[harness]]
 name = "claude"

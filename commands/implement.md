@@ -2,6 +2,7 @@ Required variables (the caller must set these):
 MODEL_ID=<Model-X.Y-level>          # your own model, version and reasoning level, e.g. Opus-5.5-high
 BASE_BRANCH=<branch>                # the branch to build on, e.g. PS-11299-trunk
 PLAN=<plan file>                    # what to implement, e.g. /work/LLM-plans/PS-11299-port-vector-to-26.07/plan5-Opus-5.5-high.md
+OUTPUT_FILE=<summary path>          # e.g. /work/LLM-implementations/PS-11299-trunk/implement-$MODEL_ID.md
 
 Default variables (used unless the caller sets them):
 BRANCH=$BASE_BRANCH-$MODEL_ID       # your own branch, created on top of BASE_BRANCH
@@ -13,7 +14,8 @@ If a required variable is missing, stop and ask for it.
 
 On top of BASE_BRANCH create BRANCH and implement PLAN there. Other models implement
 the same plan at the same time, each in its own worktree and branch, and the branches
-will be compared, so keep to your own worktree, branch and build dir.
+will be compared using your summaries, so keep to your own worktree, branch and build
+dir, and make the summary accurate.
 
 Environment rules
 - Before anything else, record the start time with `date '+%F %T %Z'`; it goes
@@ -80,7 +82,8 @@ Implementation rules
 - Leave no uncommitted changes. Before finishing, check that $BUILD_DIR is built from
   BRANCH's HEAD (`git -C $WORKTREE_DIR rev-parse HEAD`) and that the tests pass there.
 
-Summary (print it as your final answer; keep the field names exactly)
+Summary (write it to $OUTPUT_FILE, creating its directory if needed, and print it as your
+final answer; keep the field names exactly)
 
 ---
 model: <MODEL_ID>

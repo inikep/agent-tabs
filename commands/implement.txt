@@ -1,7 +1,9 @@
 ::# /implement BASE_BRANCH PLAN [NOTES...]: every checked model creates its own branch
 ::# BASE_BRANCH-MODEL_ID on top of BASE_BRANCH and implements PLAN there, following implement.md
-::# next to this file. Both may also be given as BASE_BRANCH=… PLAN=…; NOTES go to every model
-::# after the instructions.
+::# next to this file. The coordinator then compares the branches and builds BASE_BRANCH-final
+::# on the best one, improved from the comparison. Both arguments may also be given as
+::# BASE_BRANCH=… PLAN=…; NOTES go to every model after the instructions. IMPLEMENT_DIR, where
+::# the summaries and the comparison go, comes from [commands.variables] in the config.
 ::#
 ::# The models work from SOURCE_DIR, the git checkout with BASE_BRANCH, by default the directory
 ::# agent-tabs runs in. SOURCE_DIR=/path before NOTES changes it.
@@ -11,7 +13,25 @@
 ::# Example: /implement PS-11299-trunk PLAN=/work/LLM-plans/PS-11299-port-vector/plan4-Opus-5.5-high.md
 ::args BASE_BRANCH PLAN [NOTES...]
 
+::# 1. Every model implements the plan on its own branch
 ::send all
+OUTPUT_FILE=$IMPLEMENT_DIR/implement-$MODEL_ID.md
 Read instructions from $PROMPT_DIR/implement.md
 $NOTES
-::wait-done
+::wait-model-files $OUTPUT_FILE
+
+::# 2. The coordinator compares implementations (branches)
+::send $COORDINATOR
+IMPLEMENT_FILES=$IMPLEMENT_DIR/implement-*.md
+OUTPUT_FILE=$IMPLEMENT_DIR/compare.md
+Read instructions from $PROMPT_DIR/implement-compare.md
+$NOTES
+::wait-file $OUTPUT_FILE
+
+::# 3. The coordinator selects best base branch and improves it using comparison
+::send $COORDINATOR
+COMPARE_FILE=$IMPLEMENT_DIR/compare.md
+OUTPUT_FILE=$IMPLEMENT_DIR/final.md
+Read instructions from $PROMPT_DIR/implement-improve.md
+$NOTES
+::wait-file $OUTPUT_FILE

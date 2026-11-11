@@ -633,7 +633,7 @@ mod tests {
     #[test]
     fn implement_takes_its_arguments_by_position_or_by_name() {
         const IMPLEMENT: &str = include_str!("../commands/implement.txt");
-        let config = with_variables(&[("PROMPT_DIR", "/p")]);
+        let config = with_variables(&[("IMPLEMENT_DIR", "/i/$BASE_BRANCH"), ("PROMPT_DIR", "/p")]);
         let fill_implement = |args: &[&str]| {
             fill(IMPLEMENT, "implement", args, &config).map(|t| t.map(|(text, _)| text))
         };
@@ -649,26 +649,51 @@ mod tests {
             .unwrap();
         assert_eq!(mixed, by_name);
         assert!(
-            by_name.starts_with("BASE_BRANCH=PS-1-trunk\nPLAN=/plans/plan5.md\nPROMPT_DIR=/p\n::#"),
+            by_name.starts_with(
+                "BASE_BRANCH=PS-1-trunk\nPLAN=/plans/plan5.md\nIMPLEMENT_DIR=/i/$BASE_BRANCH\nPROMPT_DIR=/p\n::#"
+            ),
             "{by_name}"
         );
         let steps = parse(&by_name, &["opus-5.5"]).unwrap().unwrap();
-        assert_eq!(steps.len(), 2);
-        let Command::Send { targets, text } = &steps[0].command else {
-            panic!("{steps:?}");
-        };
-        assert_eq!(targets, &Targets::All);
-        assert!(
-            text.ends_with("\nRead instructions from $PROMPT_DIR/implement.md"),
-            "{text}"
+        assert_eq!(steps.len(), 6);
+        let sends: Vec<(&Targets, &String)> = steps
+            .iter()
+            .filter_map(|s| match &s.command {
+                Command::Send { targets, text } => Some((targets, text)),
+                _ => None,
+            })
+            .collect();
+        let coordinator = Targets::Named(vec!["opus-5.5".into()]);
+        let expected = [
+            (&Targets::All, "implement.md"),
+            (&coordinator, "implement-compare.md"),
+            (&coordinator, "implement-improve.md"),
+        ];
+        assert_eq!(sends.len(), expected.len());
+        for ((targets, text), (want, prompt)) in sends.iter().zip(expected) {
+            assert_eq!(*targets, want, "{text}");
+            assert!(
+                text.ends_with(&format!("\nRead instructions from $PROMPT_DIR/{prompt}")),
+                "{text}"
+            );
+            assert!(
+                CommandsConfig::default().dir().join(prompt).exists(),
+                "{prompt}"
+            );
+        }
+        let model = "Opus-5.5-high";
+        let waits: Vec<String> = [1, 3, 5]
+            .iter()
+            .map(|&i| steps[i].command.path(Some(model)).unwrap())
+            .collect();
+        assert_eq!(
+            waits,
+            [
+                "/i/PS-1-trunk/implement-Opus-5.5-high.md",
+                "/i/PS-1-trunk/compare.md",
+                "/i/PS-1-trunk/final.md"
+            ]
         );
-        assert!(
-            CommandsConfig::default()
-                .dir()
-                .join("implement.md")
-                .exists()
-        );
-        assert_eq!(steps[1].command, Command::WaitDone { targets: None });
 
         let text = fill_implement(&["PLAN=/x.md", "PS-1-trunk", "Don't", "build"])
             .unwrap()
@@ -678,7 +703,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("implement.md\nDon't build\n::wait-done"),
+            text.contains("implement.md\nDon't build\n::wait-model-files"),
             "{text}"
         );
         assert_eq!(
@@ -694,6 +719,7 @@ mod tests {
             ("REVIEW_DIR", "/r/$TARGET"),
             ("PLAN_DIR", "/p/$TARGET"),
             ("SUB", "$PLAN_DIR/sub"),
+            ("IMPLEMENT_DIR", "/i/$BASE_BRANCH"),
         ]);
         let (text, _) = fill(IMPLEMENT, "implement", &["PS-1-trunk", "/x.md"], &config)
             .unwrap()
