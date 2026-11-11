@@ -205,6 +205,37 @@ fn unique(names: &[String]) -> Vec<&str> {
     seen
 }
 
+/// The prompt boxes' labels for `names`: each without its version, the
+/// dash-separated parts with a digit (`gpt-6-astra` is `gpt-astra`,
+/// `kimi-k3` is `kimi`), unless that leaves nothing or two the same.
+fn target_labels(names: &[&str]) -> Vec<String> {
+    let short: Vec<String> = names
+        .iter()
+        .map(|name| {
+            let parts: Vec<&str> = name
+                .split('-')
+                .filter(|part| !part.chars().any(|c| c.is_ascii_digit()))
+                .collect();
+            if parts.is_empty() {
+                name.to_string()
+            } else {
+                parts.join("-")
+            }
+        })
+        .collect();
+    short
+        .iter()
+        .zip(names)
+        .map(|(label, name)| {
+            if short.iter().filter(|l| *l == label).count() > 1 {
+                name.to_string()
+            } else {
+                label.clone()
+            }
+        })
+        .collect()
+}
+
 /// Drawn after the fold arrow of each main tab section header.
 const REFRESH_BUTTON: &str = "⟳ ";
 
@@ -1457,9 +1488,10 @@ impl App {
         let mut x = area.x + 1 + heading.width() as u16;
         let mut hits = self.target_hits.borrow_mut();
         hits.retain(|h| h.kind != kind);
-        for (i, pane) in self.panes.iter().enumerate() {
+        let names: Vec<&str> = self.panes.iter().map(Pane::name).collect();
+        for (i, name) in target_labels(&names).into_iter().enumerate() {
             let on = composer.targets[i];
-            let label = format!("[{}] {} ", if on { "x" } else { " " }, pane.name());
+            let label = format!("[{}] {name} ", if on { "x" } else { " " });
             let width = label.width() as u16;
             hits.push(TargetHit {
                 kind,
@@ -4044,6 +4076,38 @@ mod tests {
         assert!(
             text.contains("✗ ::wait-file /nonexistent/again.md"),
             "{text}"
+        );
+    }
+
+    #[test]
+    fn prompt_box_labels_leave_out_the_versions() {
+        let names = [
+            "fable-5.2",
+            "opus-5.5",
+            "gpt-6-astra",
+            "gemini-4-carbon",
+            "kimi-k3",
+            "muse-wonder",
+            "grok-4.7",
+            "4o",
+        ];
+        assert_eq!(
+            target_labels(&names),
+            [
+                "fable",
+                "opus",
+                "gpt-astra",
+                "gemini-carbon",
+                "kimi",
+                "muse-wonder",
+                "grok",
+                "4o"
+            ]
+        );
+        assert_eq!(
+            target_labels(&["opus-5.5", "opus-4.8", "glm-5.3"]),
+            ["opus-5.5", "opus-4.8", "glm"],
+            "the same without versions keep them"
         );
     }
 

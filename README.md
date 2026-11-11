@@ -218,7 +218,9 @@ The main tab has its own prompt box at the bottom, always active: type a prompt
 and press `Enter` to send it to every ticked harness. All are ticked at first,
 except disabled harnesses that haven't been started;
 click a `[x] name` label in the box's title to untick or tick one, and the
-choice is kept for later prompts. `[x]` only means "send to this harness"; the
+choice is kept for later prompts. A label leaves out the version, the parts of
+the name with a digit (`gpt-6-astra` is `[x] gpt-astra`), unless two would
+then be the same. `[x]` only means "send to this harness"; the
 tab markers show whether a harness is working. You can then watch the round
 progress and read the answers without leaving the tab. The box edits like the
 composer (`Alt+Enter` for a new line, `↑`/`↓` for history, `Esc` to clear), so
