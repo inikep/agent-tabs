@@ -13,7 +13,7 @@ approvals, slash commands and history all stay exactly as each harness shows
 them.
 
 ```
- 1 claude ● │ 2 codex │ 3 agy │ 4 cursor ✗ │
+ main│ claude│●codex│ agy│✗cursor
 ╭──────────────────────────────────────────────╮
 │  …the active harness's own UI…               │
 ╰──────────────────────────────────────────────╯

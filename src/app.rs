@@ -1205,8 +1205,8 @@ impl App {
                 self.tab_label(index)
             };
             if position > 0 {
-                spans.push(Span::raw(" │ ").dark_gray());
-                x += 3;
+                spans.push(Span::raw("│").dark_gray());
+                x += 1;
             }
             let width = text.width() as u16;
             self.tab_spans.push((x, x + width));
