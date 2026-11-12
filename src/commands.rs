@@ -601,9 +601,9 @@ mod tests {
 
     #[test]
     fn a_last_word_with_dots_takes_the_rest() {
-        const PLAN: &str = include_str!("../commands/plan.txt");
+        const PLAN: &str = include_str!("../commands/plan-full.txt");
         let config = with_variables(&[("PLAN_DIR", "/p/$TARGET")]);
-        let fill_plan = |args: &[&str]| fill(PLAN, "plan", args, &config);
+        let fill_plan = |args: &[&str]| fill(PLAN, "plan-full", args, &config);
         let (text, added) = fill_plan(&["PS-1", "PLAN_DIR=/x", "implement", "option", "B"])
             .unwrap()
             .unwrap();
@@ -624,10 +624,30 @@ mod tests {
         assert_eq!(steps[9].command.path(Some("M")).unwrap(), "/x/plan4-M.md");
         let (text, _) = fill_plan(&["PS-1", "use", "X=1"]).unwrap().unwrap();
         assert!(text.contains("\nTASK=use X=1\n"), "{text}");
-        let usage = "usage: /plan TARGET TASK... [NAME=value…]";
+        let usage = "usage: /plan-full TARGET TASK... [NAME=value…]";
         assert_eq!(fill_plan(&["PS-1"]), Err(usage.into()));
         assert_eq!(fill_plan(&["PS-1", "A=1"]), Err(usage.into()));
         assert_eq!(fill_plan(&[]), Ok(None));
+    }
+
+    #[test]
+    fn plan_has_the_coordinator_improve_the_best_plan() {
+        const PLAN: &str = include_str!("../commands/plan.txt");
+        let config = with_variables(&[("PLAN_DIR", "/p/$TARGET")]);
+        let (text, _) = fill(PLAN, "plan", &["PS-1", "do", "it"], &config)
+            .unwrap()
+            .unwrap();
+        let steps = parse(&text, &["opus-5.5", "gpt-6"]).unwrap().unwrap();
+        assert_eq!(steps.len(), 4);
+        let Command::Send { targets, text } = &steps[2].command else {
+            panic!("{steps:?}");
+        };
+        assert_eq!(targets, &Targets::Named(vec!["opus-5.5".into()]));
+        assert!(text.contains("PLAN_FILES=$PLAN_DIR/plan-*.md\n"), "{text}");
+        assert_eq!(
+            steps[3].command.path(Some("M")).unwrap(),
+            "/p/PS-1/plan2-final-M.md"
+        );
     }
 
     #[test]
@@ -902,6 +922,7 @@ mod tests {
             [
                 "/implement BASE_BRANCH PLAN [NOTES...]",
                 "/plan TARGET TASK...",
+                "/plan-full TARGET TASK...",
                 "/review BASE..TARGET [NOTES...]"
             ]
         );

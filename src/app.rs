@@ -4511,6 +4511,7 @@ mod tests {
         assert!(text.contains("No rounds yet"), "{text}");
         assert!(text.contains("  /review BASE..TARGET [NOTES...]"), "{text}");
         assert!(text.contains("  /plan TARGET TASK..."), "{text}");
+        assert!(text.contains("  /plan-full TARGET TASK..."), "{text}");
         assert!(
             text.contains("    Every checked model reviews BASE..TARGET"),
             "the usage isn't repeated: {text}"

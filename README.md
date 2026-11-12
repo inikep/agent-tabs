@@ -367,8 +367,9 @@ Check if all issues from $REVIEW_COMBINED were fixed in $TARGET
 repository's [`commands/`](commands/), found through the path agent-tabs
 was built from (`dir` under `[commands]` in the config overrides it). A
 template is an ordinary prompt or a script whose values come from the
-command's arguments and from the config. There are three so far,
-[`commands/plan.txt`](commands/plan.txt) and
+command's arguments and from the config. There are four so far,
+[`commands/plan.txt`](commands/plan.txt),
+[`commands/plan-full.txt`](commands/plan-full.txt) and
 [`commands/implement.txt`](commands/implement.txt) (below), and
 [`commands/review.txt`](commands/review.txt):
 
@@ -478,11 +479,17 @@ and only the prompts it points to use `SOURCE_DIR`.
   codex's `/review`) still work. So is `/NAME` without a template.
 
 `/plan TARGET TASK...` has every checked model plan the task in
-`$PLAN_DIR` (`PLAN_DIR = "/work/LLM-plans/$TARGET"` under
-`[commands.variables]`), then improve its plan from all plans, compare the
-improved plans, improve its plan from the comparisons, and finally pick the
-best plan as a base and improve it, each step into its own files:
-`plan-`, `plan2-`, `compare-`, `plan3-` and `plan4-$MODEL_ID.md`.
+`$PLAN_DIR/plan-$MODEL_ID.md` (`PLAN_DIR = "/work/LLM-plans/$TARGET"` under
+`[commands.variables]`), then has `$COORDINATOR` pick the best plan as a
+base and improve it using the other plans, into
+`$PLAN_DIR/plan2-final-$MODEL_ID.md` with its own `MODEL_ID`, ranking the
+plans at the end.
+
+`/plan-full TARGET TASK...` takes longer: after the first plans, every
+checked model improves its plan from all plans, compares the improved
+plans, improves its plan from the comparisons, and finally picks the best
+plan as a base and improves it, each step into its own files: `plan-`,
+`plan2-`, `compare-`, `plan3-` and `plan4-$MODEL_ID.md`.
 `/plan PS-11940-merge-26.10 implement option B` sends, besides any other
 `[commands.variables]`,
 
