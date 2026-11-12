@@ -38,7 +38,7 @@ All harnesses start in the current directory, or in `--cwd DIR`.
 ### `--yolo`
 
 `agent-tabs --yolo` (or `yolo = true` in the config) starts every harness in its
-own "approve everything" mode, and shows a red `YOLO` badge in the tab bar:
+own "approve everything" mode, and shows a red `YOLO` badge at the right end of the status line:
 
 | Harness | Added flag | Removed from its args |
 |---|---|---|
@@ -67,7 +67,7 @@ intercepts its prefix key, `Ctrl+\`, and `Alt+1`…`Alt+9`.
 | `Ctrl+\` `[` (or `PgUp`), `Shift+PgUp`, mouse wheel | Scroll back through a tab's history |
 | `Ctrl+\` `r` | Restart the current harness |
 | `Ctrl+\` `x` | Cancel prompts queued for the current harness |
-| `Ctrl+\` `q`, or click `✕ exit` (top right) | Quit, stopping every harness. It asks first; press `y` or click `✕ exit` again |
+| `Ctrl+\` `q`, or click `✕exit` (top right) | Quit, stopping every harness. It asks first; press `y` or click `✕exit` again |
 | `Ctrl+\` `?` | Help |
 | `Ctrl+\` `Ctrl+\` | Send a literal `Ctrl+\` to the harness |
 

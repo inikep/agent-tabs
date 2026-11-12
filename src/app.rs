@@ -1245,25 +1245,9 @@ impl App {
             spans.push(Span::styled(text, style));
         }
         frame.render_widget(Paragraph::new(Line::from(spans)), tabs_area);
-        let exit = " ✕ exit ";
+        let exit = "✕exit";
         let exit_width = exit.width() as u16;
         let exit_x = tabs_area.right().saturating_sub(exit_width);
-        if self.config.yolo {
-            let badge = " YOLO ";
-            let badge_width = badge.width() as u16;
-            frame.render_widget(
-                Paragraph::new(Span::styled(
-                    badge,
-                    Style::default().white().on_red().bold(),
-                )),
-                Rect::new(
-                    exit_x.saturating_sub(badge_width + 1),
-                    tabs_area.y,
-                    badge_width,
-                    1,
-                ),
-            );
-        }
         self.exit_span = (exit_x, tabs_area.right());
         let exit_style = if self.mode == Mode::ConfirmQuit {
             Style::default().white().on_red().bold()
@@ -1359,9 +1343,22 @@ impl App {
     /// The status line, and above it, an error too long for that line in
     /// full, so it isn't cut off.
     fn draw_status(&self, frame: &mut Frame, status_area: Rect) {
+        let mut line_area = status_area;
+        if self.config.yolo {
+            let badge = " YOLO ";
+            let badge_width = (badge.width() as u16).min(status_area.width);
+            line_area.width -= badge_width;
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    badge,
+                    Style::default().white().on_red().bold(),
+                )),
+                Rect::new(line_area.right(), status_area.y, badge_width, 1),
+            );
+        }
         let line = self.status_line();
-        let cut = line.width() > usize::from(status_area.width);
-        frame.render_widget(Paragraph::new(line), status_area);
+        let cut = line.width() > usize::from(line_area.width);
+        frame.render_widget(Paragraph::new(line), line_area);
         let Some((text, _, true)) = &self.message else {
             return;
         };
@@ -1427,7 +1424,7 @@ impl App {
             ]),
             Mode::ConfirmQuit => Line::from(vec![
                 Span::raw(" QUIT ").white().on_red(),
-                Span::raw(" Stop all harnesses and quit? y/N, or click ✕ exit again"),
+                Span::raw(" Stop all harnesses and quit? y/N, or click ✕exit again"),
             ]),
             Mode::ConfirmRestart => Line::from(vec![
                 Span::raw(" RESTART ").white().on_red(),
@@ -1553,7 +1550,7 @@ impl App {
             Line::from("  Ctrl+\\       send a literal Ctrl+\\ to the harness"),
             Line::from(""),
             Line::from("Mouse: drag with the left button to select text; it's copied on release."),
-            Line::from("Click a ✓target in a prompt box to toggle it; click ✕ exit to quit."),
+            Line::from("Click a ✓target in a prompt box to toggle it; click ✕exit to quit."),
             Line::from(""),
             Line::from("Prompt composer:").bold(),
             Line::from("  Enter send · Alt+Enter / Ctrl+J newline · Alt+1-9 toggle target"),
@@ -3704,16 +3701,17 @@ mod tests {
         );
         let rows = buffer_rows(&draw_app(&mut app, 80, 10));
         assert!(
-            rows[0].contains("YOLO") && rows[0].contains("✕ exit"),
+            !rows[0].contains("YOLO") && rows[0].ends_with("✕exit"),
             "{rows:#?}"
         );
+        assert!(rows[9].ends_with(" YOLO "), "{rows:#?}");
     }
 
     #[test]
     fn exit_button_asks_first_then_quits() {
         let mut app = app(&["a"]);
         let rows = buffer_rows(&draw_app(&mut app, 80, 10));
-        let (x, y) = find(&rows, "✕ exit");
+        let (x, y) = find(&rows, "✕exit");
         assert_eq!(y, 0);
         assert!(x > 60, "exit is right-aligned: {x}");
         click(&mut app, x + 2, 0);
