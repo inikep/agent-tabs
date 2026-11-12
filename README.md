@@ -495,7 +495,9 @@ and only the prompts it points to use `SOURCE_DIR`.
 `[commands.variables]`), then has `$COORDINATOR` pick the best plan as a
 base and improve it using the other plans, into
 `$PLAN_DIR/plan2-final-$MODEL_ID.md` with its own `MODEL_ID`, ranking the
-plans at the end.
+plans at the end. Every step tells the models not to build or run tests or
+the server, but to plan from the code and git history only; so does
+`/plan-full`.
 
 `/plan-full TARGET TASK...` takes longer: after the first plans, every
 checked model improves its plan from all plans, compares the improved

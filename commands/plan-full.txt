@@ -11,6 +11,7 @@
 ::# 1. Every model writes its own plan
 ::send all
 OUTPUT_FILE=$PLAN_DIR/plan-$MODEL_ID.md
+Don't build, and don't run tests or the server; plan from the code and git history only.
 In $OUTPUT_FILE create a plan to $TASK
 ::wait-model-files $OUTPUT_FILE
 
@@ -18,6 +19,7 @@ In $OUTPUT_FILE create a plan to $TASK
 ::send all
 PLAN_FILES=$PLAN_DIR/plan-*.md
 OUTPUT_FILE=$PLAN_DIR/plan2-$MODEL_ID.md
+Don't build, and don't run tests or the server; plan from the code and git history only.
 Improve your plan using all plans in $PLAN_FILES and create $OUTPUT_FILE
 ::wait-model-files $OUTPUT_FILE
 
@@ -25,6 +27,7 @@ Improve your plan using all plans in $PLAN_FILES and create $OUTPUT_FILE
 ::send all
 PLAN_FILES=$PLAN_DIR/plan2-*.md
 OUTPUT_FILE=$PLAN_DIR/plan2-compare-$MODEL_ID.md
+Don't build, and don't run tests or the server; plan from the code and git history only.
 Compare correctness of all plans in $PLAN_FILES and create $OUTPUT_FILE
 ::wait-model-files $OUTPUT_FILE
 
@@ -32,6 +35,7 @@ Compare correctness of all plans in $PLAN_FILES and create $OUTPUT_FILE
 ::send all
 PLAN_FILES=$PLAN_DIR/plan2-compare-*.md
 OUTPUT_FILE=$PLAN_DIR/plan3-$MODEL_ID.md
+Don't build, and don't run tests or the server; plan from the code and git history only.
 Improve your plan basing on $PLAN_FILES and create $OUTPUT_FILE
 ::wait-model-files $OUTPUT_FILE
 
@@ -39,5 +43,6 @@ Improve your plan basing on $PLAN_FILES and create $OUTPUT_FILE
 ::send all
 PLAN_FILES=$PLAN_DIR/plan3-*.md
 OUTPUT_FILE=$PLAN_DIR/plan4-$MODEL_ID.md
+Don't build, and don't run tests or the server; plan from the code and git history only.
 Select best plan from $PLAN_FILES as a base, improve it and create $OUTPUT_FILE
 ::wait-model-files $OUTPUT_FILE
