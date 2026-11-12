@@ -90,6 +90,10 @@ with `Alt+N` in the composer, and agent-tabs starts it and shows its tab right
 away. From then on it is treated like any other harness. `--only` starts the
 harnesses it names even when they are disabled.
 
+Unchecking a harness in the main tab's prompt box hides its tab too. The
+harness keeps running, and `Ctrl+\` `a` leaves it out; checking it again, or
+sending it a prompt from the composer or a script, shows the tab again.
+
 ```toml
 [[harness]]
 name = "grok-4.7"

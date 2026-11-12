@@ -48,6 +48,9 @@ pub struct App {
     mode: Mode,
     composer: Composer,
     main_input: Composer,
+    /// Harnesses unchecked in the main prompt box: their tabs are hidden,
+    /// though they keep running, until checked again or sent a prompt.
+    hidden: Vec<bool>,
     config: Config,
     cwd: PathBuf,
     log_dir: Option<PathBuf>,
@@ -460,6 +463,7 @@ impl App {
             mode: Mode::Normal,
             composer: Composer::new(config.harnesses.len()),
             main_input: Composer::new(config.harnesses.len()),
+            hidden: vec![false; config.harnesses.len()],
             config,
             cwd,
             log_dir,
@@ -689,6 +693,7 @@ impl App {
     }
 
     pub fn handle_event(&mut self, event: Event) {
+        let checked = self.main_input.targets.clone();
         match event {
             Event::Key(key) if key.kind != KeyEventKind::Release => self.on_key(key),
             Event::Paste(text) => self.on_paste(&text),
@@ -696,7 +701,21 @@ impl App {
             Event::Resize(cols, rows) => self.resize(Size { cols, rows }),
             _ => {}
         }
+        self.hide_unchecked(&checked);
         self.start_checked();
+    }
+
+    /// Hides the tabs of the harnesses just unchecked in the main prompt box
+    /// and shows those just checked.
+    fn hide_unchecked(&mut self, before: &[bool]) {
+        for (i, (&was, &now)) in before.iter().zip(&self.main_input.targets).enumerate() {
+            if was != now {
+                self.hidden[i] = !now;
+            }
+        }
+        if self.hidden.get(self.active) == Some(&true) {
+            self.select(self.main_tab());
+        }
     }
 
     /// Starts the disabled harnesses checked in a prompt box, which also shows
@@ -754,11 +773,17 @@ impl App {
     }
 
     /// The tabs in tab-bar order: the main tab first, then the harnesses in
-    /// config order, leaving out disabled ones that have not been started.
+    /// config order, leaving out disabled ones that have not been started
+    /// and those unchecked in the main prompt box.
     fn visible_tabs(&self) -> Vec<usize> {
         std::iter::once(self.main_tab())
-            .chain((0..self.panes.len()).filter(|&i| self.panes[i].status() != Status::Stopped))
+            .chain((0..self.panes.len()).filter(|&i| self.shown(i)))
             .collect()
+    }
+
+    /// Whether harness `i` has a tab: it runs and isn't hidden.
+    fn shown(&self, i: usize) -> bool {
+        self.panes[i].status() != Status::Stopped && !self.hidden[i]
     }
 
     fn select_position(&mut self, position: usize) {
@@ -774,12 +799,10 @@ impl App {
         self.select(tabs[next]);
     }
 
-    /// The harnesses a prompt to all of them targets until toggled: all but
-    /// the disabled ones that have not been started.
+    /// The harnesses a prompt to all of them targets until toggled: those
+    /// with a tab.
     fn default_targets(&self) -> Vec<usize> {
-        (0..self.panes.len())
-            .filter(|&i| self.panes[i].status() != Status::Stopped)
-            .collect()
+        (0..self.panes.len()).filter(|&i| self.shown(i)).collect()
     }
 
     fn open_composer(&mut self, all: bool) {
@@ -1017,6 +1040,7 @@ impl App {
     fn submit_prompt(&mut self, text: &str, targets: &[usize], from_script: bool) {
         for &i in targets {
             self.start(i);
+            self.hidden[i] = false;
         }
         if from_script {
             self.add_to_script_round(text, targets);
@@ -3653,6 +3677,32 @@ mod tests {
             [0, 2],
             "selection is kept for the next prompt"
         );
+    }
+
+    #[test]
+    fn unchecking_a_harness_in_the_main_prompt_box_hides_its_tab() {
+        let mut app = app(&["a", "b", "c"]);
+        thread::sleep(Duration::from_millis(200));
+        app.handle_event(key(KeyCode::Char('1'), KeyModifiers::ALT));
+        assert_eq!(app.visible_tabs(), [3, 0, 1, 2]);
+        let rows = buffer_rows(&draw_app(&mut app, 100, 20));
+        let (x, y) = find(&rows, "✓a ✓b ✓c");
+        click(&mut app, x + 3, y);
+        assert_eq!(app.visible_tabs(), [3, 0, 2]);
+        assert_eq!(app.pane(1).status(), Status::Running, "it keeps running");
+        let rows = buffer_rows(&draw_app(&mut app, 100, 20));
+        assert!(!rows[0].contains(" b"), "{:?}", rows[0]);
+        click(&mut app, x + 3, y);
+        assert_eq!(app.visible_tabs(), [3, 0, 1, 2], "checking it shows it");
+
+        click(&mut app, x + 3, y);
+        app.handle_event(key(KeyCode::Char('\\'), KeyModifiers::CONTROL));
+        app.handle_event(key(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert_eq!(app.composer.selected(), [0, 2], "prompt all leaves it out");
+        app.handle_event(key(KeyCode::Char('2'), KeyModifiers::ALT));
+        type_text(&mut app, "hello");
+        app.handle_event(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.visible_tabs(), [3, 0, 1, 2], "a prompt shows it again");
     }
 
     #[test]
