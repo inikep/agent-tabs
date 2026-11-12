@@ -2,7 +2,7 @@ Required variables (the caller must set these):
 MODEL_ID=<Model-X.Y-level>          # your own model, version and reasoning level, e.g. Opus-5.5-high
 BASE_BRANCH=<branch>                # the branch the implementations are built on, e.g. PS-11299-trunk
 PLAN=<plan file>                    # the plan they implement
-PROMPT_DIR=<dir>                    # where implement.md is
+PROMPT_DIR=<dir>                    # where implement.md and environment.md are
 COMPARE_FILE=<comparison path>      # from implement-compare.md, e.g. /work/LLM-implementations/PS-11299-trunk/compare.md
 OUTPUT_FILE=<summary path>          # e.g. /work/LLM-implementations/PS-11299-trunk/final.md
 
@@ -19,9 +19,7 @@ $COMPARE_FILE. Start from the comparison's `best:` and its "## Best base" reason
 If checking the code shows another branch is a better base, use that one and say why
 under `## Deviations`.
 
-Environment rules
-- Before anything else, record the start time with `date '+%F %T %Z'`; it goes
-  under `started:` in the summary.
+Environment rules: those in $PROMPT_DIR/environment.md, and
 - These rules replace implement.md's rules for BRANCH and the worktree. FINAL_BRANCH
   is a new branch, created on the best branch, not on BASE_BRANCH:
   - if FINAL_BRANCH already exists (`git -C $SOURCE_DIR rev-parse --verify FINAL_BRANCH`),
@@ -31,13 +29,11 @@ Environment rules
   - if it exists, it is on your own branch from implement.md. If it has uncommitted
     changes, stop and ask. Otherwise switch it, leaving your own branch as it is:
     `git -C $WORKTREE_DIR checkout -b FINAL_BRANCH <best branch>`
-  Make all source changes there, on FINAL_BRANCH. Never push, and never change
+  Make all source changes there, on FINAL_BRANCH. Never change
   BASE_BRANCH or the models' branches (your own included); take code from them with
   `git cherry-pick`, `git show <branch>:path` or by hand.
-- Build in $BUILD_DIR and run tests by the other environment rules of
-  $PROMPT_DIR/implement.md (cmake options, job limits, MTR, working in parallel);
-  read them there if you haven't. A build dir from implement.md is reused: ninja
-  rebuilds what FINAL_BRANCH changed.
+- A build dir from implement.md is reused: ninja rebuilds what FINAL_BRANCH
+  changed.
 
 Implementation rules
 - Make every change listed under the comparison's "## Improvements" for the branch

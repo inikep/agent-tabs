@@ -2,7 +2,7 @@ Required variables (the caller must set these):
 MODEL_ID=<Model-X.Y-level>          # your own model, version and reasoning level, e.g. Opus-5.5-high
 BASE_BRANCH=<branch>                # the branch the implementations are built on, e.g. PS-11299-trunk
 PLAN=<plan file>                    # the plan they implement
-PROMPT_DIR=<dir>                    # where implement.md is
+PROMPT_DIR=<dir>                    # where implement.md and environment.md are
 IMPLEMENT_FILES=<summary files or glob>  # each model's summary from implement.md, e.g. /work/LLM-implementations/PS-11299-trunk/implement-*.md
 OUTPUT_FILE=<report path>           # the comparison, e.g. /work/LLM-implementations/PS-11299-trunk/compare.md
 
@@ -18,10 +18,8 @@ the branch under `branch:`. The next step picks the best branch as the base for
 the final implementation and improves it using this comparison, so say clearly which
 branch is the best base and what the others do better.
 
-Environment rules
-- Before anything else, record the start time with `date '+%F %T %Z'`; it goes
-  under `started:` in the comparison.
-- Don't modify $SOURCE_DIR, BASE_BRANCH, or any model's branch, worktree or commits.
+Environment rules: those in $PROMPT_DIR/environment.md, and
+- Don't modify BASE_BRANCH or any model's branch, worktree or commits.
   Read code without a worktree: `git -C $SOURCE_DIR diff BASE_BRANCH...<branch>`,
   `git -C $SOURCE_DIR log BASE_BRANCH..<branch>`, `git -C $SOURCE_DIR show <branch>:path`.
 - Check that each summary's branch exists, is at the SHA the summary gives, and is
@@ -29,9 +27,8 @@ Environment rules
   Note any mismatch; compare the branch as it is, not as the summary says.
 - To check a claim by running something, use the branch's own build dir (under
   `built:` in its summary; its model is done now), without changing its worktree.
-  For anything else, follow the environment rules of $PROMPT_DIR/implement.md.
-  Never run two MTR instances on one build dir at once, and never use more than 32
-  jobs.
+  For anything else, use your own worktree and build dir as environment.md says,
+  with the worktree detached at the branch you check.
 
 For each branch
 1. Plan coverage: which PLAN steps it implements fully, partly or not at all, and

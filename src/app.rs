@@ -4379,7 +4379,7 @@ mod tests {
         assert_eq!(app.main_input.text(), "/review percona/8.4..PS-1");
         let message = &app.message.as_ref().unwrap().0;
         assert!(
-            message.contains("commands/review.txt: line 22: unknown target opus-5.5"),
+            message.contains("commands/review.txt: line 23: unknown target opus-5.5"),
             "{message}"
         );
 

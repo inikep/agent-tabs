@@ -7,6 +7,7 @@ OUTPUT_FILE=<summary path>          # e.g. /work/LLM-implementations/PS-11299-tr
 Default variables (used unless the caller sets them):
 BRANCH=$BASE_BRANCH-$MODEL_ID       # your own branch, created on top of BASE_BRANCH
 SOURCE_DIR=$PWD                     # git checkout with BASE_BRANCH
+PROMPT_DIR=<the directory of this file>  # where environment.md is
 WORKTREE_DIR=$SOURCE_DIR-$MODEL_ID  # your own git worktree on BRANCH; always used
 BUILD_DIR=$SOURCE_DIR-$MODEL_ID-deb-gcc16-rocks  # your build dir
 
@@ -17,11 +18,8 @@ the same plan at the same time, each in its own worktree and branch, and the bra
 will be compared using your summaries, so keep to your own worktree, branch and build
 dir, and make the summary accurate.
 
-Environment rules
-- Before anything else, record the start time with `date '+%F %T %Z'`; it goes
-  under `started:` in the summary.
-- Don't modify $SOURCE_DIR; it is shared with other agents. Always work in your
-  own git worktree $WORKTREE_DIR, on BRANCH:
+Environment rules: those in $PROMPT_DIR/environment.md, and
+- Always work in your own git worktree $WORKTREE_DIR, on BRANCH:
   - if BRANCH already exists (`git -C $SOURCE_DIR rev-parse --verify BRANCH`),
     stop and ask; it may hold an earlier run's work.
   - if $WORKTREE_DIR doesn't exist, create it:
@@ -30,43 +28,7 @@ Environment rules
     (`git -C $SOURCE_DIR worktree list`), then `git -C $WORKTREE_DIR checkout -b
     BRANCH BASE_BRANCH`. If it has uncommitted changes from an earlier run, stop and
     ask before discarding them.
-  Make all source changes there. Never push, and never change BASE_BRANCH or other
-  models' branches.
-- Build in $BUILD_DIR, configured out of tree from $WORKTREE_DIR with:
-
-    CC=gcc-16 CXX=g++-16 cmake -GNinja $WORKTREE_DIR \
-      -DCMAKE_BUILD_TYPE=Debug \
-      -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-      -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-      -DMYSQL_MAINTAINER_MODE=OFF \
-      -DDOWNLOAD_BOOST=1 \
-      -DWITH_BOOST=/work/mysql-server/_deps \
-      -DWITH_ROCKSDB=ON \
-      -DWITH_PAM=ON \
-      -DENABLE_DOWNLOADS=1 \
-      -DWITH_READLINE=system \
-      -DWITH_CURL=system \
-      -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=gold \
-      -DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=gold \
-      -DCMAKE_MODULE_LINKER_FLAGS=-fuse-ld=gold
-    ninja -j32
-
-  Never build or run MTR with more than 32 jobs (always pass -j32 or lower, and
-  --parallel <= 32); the machine is shared. Re-run cmake when a CMakeLists.txt or
-  *.cmake file changed. Record any extra flags under `built:` in the summary.
-- Run MTR from $WORKTREE_DIR with the build's binaries: `cd $WORKTREE_DIR/mysql-test
-  && MTR_BINDIR=$BUILD_DIR perl ./mysql-test-run.pl ...`.
-- MTR on this machine: put --vardir under your build dir (not /tmp); pass
-  `--mysqld=--innodb_use_native_aio=0` (the AIO limit is shared); Debug builds need
-  `--debug-server`; never run two MTR instances on one build dir at once (keyring
-  tests write config into the build tree); `export DEBUGINFOD_URLS=` so MTR's gdb
-  backtrace after a crash does not hang on downloads, and if gdb hangs anyway kill
-  it by PID (a `pkill -f` pattern can match your own shell). Re-run a failing test
-  alone before deciding it is your change's fault or a flaky test.
-- Work in parallel where safe: start `cmake` + `ninja -j32` in the background and
-  read code, compare with BASE_BRANCH, and write tests while it builds; batch
-  read/git tool calls; pass several test names to one `mysql-test-run.pl --parallel`
-  call to avoid repeated MTR startup overhead.
+  Make all source changes there. Never change BASE_BRANCH or other models' branches.
 
 Implementation rules
 - Read PLAN fully before changing anything, and follow it. Where it is wrong,

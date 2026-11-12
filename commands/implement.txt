@@ -16,6 +16,7 @@
 ::# 1. Every model implements the plan on its own branch
 ::send all
 OUTPUT_FILE=$IMPLEMENT_DIR/implement-$MODEL_ID.md
+Read environment rules from $PROMPT_DIR/environment.md
 Read instructions from $PROMPT_DIR/implement.md
 $NOTES
 ::wait-model-files $OUTPUT_FILE
@@ -24,6 +25,7 @@ $NOTES
 ::send $COORDINATOR
 IMPLEMENT_FILES=$IMPLEMENT_DIR/implement-*.md
 OUTPUT_FILE=$IMPLEMENT_DIR/compare.md
+Read environment rules from $PROMPT_DIR/environment.md
 Read instructions from $PROMPT_DIR/implement-compare.md
 Rank implementations at the end.
 $NOTES
@@ -33,6 +35,7 @@ $NOTES
 ::send $COORDINATOR
 COMPARE_FILE=$IMPLEMENT_DIR/compare.md
 OUTPUT_FILE=$IMPLEMENT_DIR/final.md
+Read environment rules from $PROMPT_DIR/environment.md
 Read instructions from $PROMPT_DIR/implement-improve.md
 $NOTES
 ::wait-file $OUTPUT_FILE

@@ -5,6 +5,7 @@ REVIEW_COMBINED=<report path>       # merged report, e.g. /data/sh/LLM/reviews/P
 
 Default variables (used unless the caller sets them):
 SOURCE_DIR=$PWD                     # git checkout with the reviewed target
+PROMPT_DIR=<the directory of this file>  # where environment.md is
 
 
 If a required variable is missing, stop and ask for it.
@@ -15,9 +16,10 @@ they don't. Below, TARGET means the target in the reports' front matter.
 The reports follow the format in review.md, and so does this one where it applies.
 Don't merge $REVIEW_COMBINED itself if $REVIEW_FILES matches it.
 
-Environment: don't modify $SOURCE_DIR. To check a finding by running something,
-follow review.md's environment rules (your own worktree and build dir). Reading code
-with `git -C $SOURCE_DIR show TARGET:path` needs no worktree.
+Environment: follow $PROMPT_DIR/environment.md. To check a finding by running
+something, use your own worktree and build dir, with the worktree detached at
+TARGET as review.md says. Reading code with `git -C $SOURCE_DIR show TARGET:path`
+needs no worktree.
 
 1. Group findings that have the same root cause: an overlapping location and the same
    mechanism. Different symptoms of one cause belong in one group; similar symptoms

@@ -6,6 +6,7 @@ OUTPUT_FILE=<report path>           # e.g. /data/sh/LLM/reviews/$TARGET/review-$
 
 Default variables (used unless the caller sets them):
 SOURCE_DIR=$PWD                     # git checkout with TARGET
+PROMPT_DIR=<the directory of this file>  # where environment.md is
 WORKTREE_DIR=$SOURCE_DIR-$MODEL_ID  # your own git worktree at TARGET; always used
 BUILD_DIR=$SOURCE_DIR-$MODEL_ID-deb-gcc16-rocks  # only if you need a build
 
@@ -15,12 +16,9 @@ Review the commits in BASE..TARGET for correctness. Other models review the same
 range at the same time, and the reports will be merged by script and by another
 model, so follow the format below exactly.
 
-Environment rules
-- Before anything else, record the start time with `date '+%F %T %Z'`; it goes
-  under `started:` in the report.
-- Don't modify $SOURCE_DIR; it is shared with other agents. Always work in your
-  own git worktree $WORKTREE_DIR, at TARGET's SHA, detached (TARGET's branch may
-  be checked out in $SOURCE_DIR):
+Environment rules: those in $PROMPT_DIR/environment.md, and
+- Work in your own git worktree $WORKTREE_DIR, at TARGET's SHA, detached (TARGET's
+  branch may be checked out in $SOURCE_DIR):
   - if it doesn't exist, create it:
     `git -C $SOURCE_DIR worktree add --detach $WORKTREE_DIR TARGET`
   - if it exists, reuse it: check that it is a worktree of $SOURCE_DIR's repository
@@ -28,51 +26,17 @@ Environment rules
     --detach TARGET`. If it has uncommitted changes from an earlier run, stop and
     ask before discarding them.
   Make all source changes (revert checks, mutants, extra tests) there.
-- If you need a build dir, use $BUILD_DIR, configured out of tree from
-  $WORKTREE_DIR with:
-
-    CC=gcc-16 CXX=g++-16 cmake -GNinja $WORKTREE_DIR \
-      -DCMAKE_BUILD_TYPE=Debug \
-      -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-      -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-      -DMYSQL_MAINTAINER_MODE=OFF \
-      -DDOWNLOAD_BOOST=1 \
-      -DWITH_BOOST=/work/mysql-server/_deps \
-      -DWITH_ROCKSDB=ON \
-      -DWITH_PAM=ON \
-      -DENABLE_DOWNLOADS=1 \
-      -DWITH_READLINE=system \
-      -DWITH_CURL=system \
-      -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=gold \
-      -DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=gold \
-      -DCMAKE_MODULE_LINKER_FLAGS=-fuse-ld=gold
-    ninja -j32
-
-  Never build or run MTR with more than 32 jobs (always pass -j32 or lower, and
-  --parallel <= 32); the machine is shared. Re-run cmake when a CMakeLists.txt or
-  *.cmake file changed. Record any extra flags under `built:` in the report.
+- Build only if you need to.
 - Check that $WORKTREE_DIR is at TARGET's SHA (`git -C $WORKTREE_DIR rev-parse HEAD`)
   before building and again after testing; record that SHA under `built:`.
-- To run extra or modified tests, keep them in $WORKTREE_DIR and run MTR from there
-  with the build's binaries: `cd $WORKTREE_DIR/mysql-test && MTR_BINDIR=$BUILD_DIR
-  perl ./mysql-test-run.pl ...`. Quote the essential lines of such tests under
-  evidence and give their path, since the worktree may be removed later.
-- MTR on this machine: put --vardir under your build dir (not /tmp); pass
-  `--mysqld=--innodb_use_native_aio=0` (the AIO limit is shared); Debug builds need
-  `--debug-server`; never run two MTR instances on one build dir at once (keyring
-  tests write config into the build tree); `export DEBUGINFOD_URLS=` so MTR's gdb
-  backtrace after a crash does not hang on downloads, and if gdb hangs anyway kill
-  it by PID (a `pkill -f` pattern can match your own shell). Re-run a failing test
-  alone before reporting it; report both runs if the failure does not repeat.
+- Keep extra or modified tests in $WORKTREE_DIR. Quote the essential lines of such
+  tests under evidence and give their path, since the worktree may be removed later.
 - To revert a hunk or add a debug hook, change $WORKTREE_DIR and rebuild only the
   affected target (for example the component) into a separate output, then swap it
   into your build dir and restore it after the run.
-- Work in parallel where safe: start `cmake` + `ninja -j32` in the background and
-  do code reading, BASE comparisons, subagent research, and test authoring while it
-  builds; batch read/git tool calls; combine reproduction and control scenarios into
-  one `.test` file (or pass multiple test names to one `mysql-test-run.pl --parallel`
-  call) to avoid repeated MTR startup overhead; pre-build mutant `.so`/binary
-  variants up front before swapping and running only the relevant tests for each.
+- While it builds, also use subagents for research; combine reproduction and
+  control scenarios into one `.test` file; pre-build mutant `.so`/binary variants
+  up front before swapping and running only the relevant tests for each.
 - Write the report to $OUTPUT_FILE and print nothing else of substance. Just
   before writing it, run `date '+%F %T %Z'` again for `finished:`, and put the
   difference under `duration:`.

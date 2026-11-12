@@ -523,7 +523,7 @@ mod tests {
         assert_eq!(targets, &Targets::All);
         assert_eq!(
             text,
-            "BASE=inikep/8.4\nTARGET=PS-2-8.4\nREVIEW_DIR=/r/$TARGET\nPROMPT_DIR=/p\nOUTPUT_FILE=$REVIEW_DIR/review-$MODEL_ID.md\nRead instructions from $PROMPT_DIR/review.md"
+            "BASE=inikep/8.4\nTARGET=PS-2-8.4\nREVIEW_DIR=/r/$TARGET\nPROMPT_DIR=/p\nOUTPUT_FILE=$REVIEW_DIR/review-$MODEL_ID.md\nRead environment rules from $PROMPT_DIR/environment.md\nRead instructions from $PROMPT_DIR/review.md"
         );
         assert_eq!(
             steps[1].command.path(Some("GPT-6-high")).unwrap(),

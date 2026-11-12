@@ -394,6 +394,7 @@ command's arguments and from the config. There are four so far,
 ::# Every checked model reviews the branch into its own file
 ::send all
 OUTPUT_FILE=$REVIEW_DIR/review-$MODEL_ID.md
+Read environment rules from $PROMPT_DIR/environment.md
 Read instructions from $PROMPT_DIR/review.md
 $NOTES
 ::wait-model-files $OUTPUT_FILE
@@ -402,8 +403,10 @@ $NOTES
 ::send $COORDINATOR
 REVIEW_FILES=$REVIEW_DIR/review-*.md
 REVIEW_COMBINED=$REVIEW_DIR/review-combined.md
+Read environment rules from $PROMPT_DIR/environment.md
 Read instructions from $PROMPT_DIR/review-merge.md
 $NOTES
+Rank reviews at the end.
 ::wait-file $REVIEW_COMBINED
 ```
 
@@ -429,7 +432,12 @@ PROMPT_DIR=/work/review/agent-tabs/commands
 The prompts the templates point to, `review.md`, `review-merge.md`,
 `implement.md`, `implement-compare.md` and `implement-improve.md`, are in
 `commands/` too: `$PROMPT_DIR` is that directory
-unless the config or an argument sets it.
+unless the config or an argument sets it. The rules they share, the worktree
+and build dir next to `$SOURCE_DIR`, the cmake options, the job limit, MTR and
+working in parallel, are in
+[`commands/environment.md`](commands/environment.md), which every step of
+`/review` and `/implement` names before its own prompt; each prompt adds its
+own rules, such as which branch its worktree is on.
 
 Words after the range are notes for the models, put on the `$NOTES` lines
 after the instructions, e.g. `/review percona/8.4..PS-1 Don't build.
@@ -513,10 +521,9 @@ files in `$IMPLEMENT_DIR` (`IMPLEMENT_DIR =
 
 1. Every checked model creates its own branch `$BASE_BRANCH-$MODEL_ID` on top
    of `BASE_BRANCH` and implements the plan file there, following
-   [`commands/implement.md`](commands/implement.md). That prompt takes the
-   worktree, build dir, cmake options and MTR rules from
-   [`commands/review.md`](commands/review.md), with the worktree on the new
-   branch instead of detached, and asks for commits with an `Implemented by`
+   [`commands/implement.md`](commands/implement.md) and
+   [`commands/environment.md`](commands/environment.md), with its worktree
+   on the new branch, and asks for commits with an `Implemented by`
    trailer and a summary (branch and SHA, build, tests, deviations from the
    plan, what's not done) in `implement-$MODEL_ID.md`.
 2. The coordinator compares the branches, following
@@ -540,6 +547,7 @@ PLAN=/work/LLM-plans/PS-11299-port-vector-to-26.07/plan5-Opus-5.5-high.md
 IMPLEMENT_DIR=/work/LLM-implementations/$BASE_BRANCH
 PROMPT_DIR=/work/review/agent-tabs/commands
 OUTPUT_FILE=$IMPLEMENT_DIR/implement-$MODEL_ID.md
+Read environment rules from $PROMPT_DIR/environment.md
 Read instructions from $PROMPT_DIR/implement.md
 ```
 
