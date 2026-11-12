@@ -24,4 +24,5 @@ REVIEW_FILES=$REVIEW_DIR/review-*.md
 REVIEW_COMBINED=$REVIEW_DIR/review-combined.md
 Read instructions from $PROMPT_DIR/review-merge.md
 $NOTES
+Rank reviews at the end.
 ::wait-file $REVIEW_COMBINED

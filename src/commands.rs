@@ -692,10 +692,8 @@ mod tests {
         assert_eq!(sends.len(), expected.len());
         for ((targets, text), (want, prompt)) in sends.iter().zip(expected) {
             assert_eq!(*targets, want, "{text}");
-            assert!(
-                text.ends_with(&format!("\nRead instructions from $PROMPT_DIR/{prompt}")),
-                "{text}"
-            );
+            let read = format!("Read instructions from $PROMPT_DIR/{prompt}");
+            assert!(text.lines().any(|l| l == read), "{text}");
             assert!(
                 CommandsConfig::default().dir().join(prompt).exists(),
                 "{prompt}"
@@ -782,7 +780,7 @@ mod tests {
             sends[0]
         );
         assert!(
-            sends[1].ends_with("review-merge.md\nDon't build. extra/libkmip is checked"),
+            sends[1].contains("review-merge.md\nDon't build. extra/libkmip is checked\n"),
             "{}",
             sends[1]
         );

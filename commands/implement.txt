@@ -25,6 +25,7 @@ $NOTES
 IMPLEMENT_FILES=$IMPLEMENT_DIR/implement-*.md
 OUTPUT_FILE=$IMPLEMENT_DIR/compare.md
 Read instructions from $PROMPT_DIR/implement-compare.md
+Rank implementations at the end.
 $NOTES
 ::wait-file $OUTPUT_FILE
 
