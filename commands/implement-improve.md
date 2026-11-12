@@ -2,38 +2,41 @@ Required variables (the caller must set these):
 MODEL_ID=<Model-X.Y-level>          # your own model, version and reasoning level, e.g. Opus-5.5-high
 BASE_BRANCH=<branch>                # the branch the implementations are built on, e.g. PS-11299-trunk
 PLAN=<plan file>                    # the plan they implement
-PROMPT_DIR=<dir>                    # where implement.md and environment.md are
 COMPARE_FILE=<comparison path>      # from implement-compare.md, e.g. /work/LLM-implementations/PS-11299-trunk/compare.md
 OUTPUT_FILE=<summary path>          # e.g. /work/LLM-implementations/PS-11299-trunk/final.md
 
 Default variables (used unless the caller sets them):
-FINAL_BRANCH=$BASE_BRANCH-final     # the improved branch, created on the best branch
+BRANCH=$BASE_BRANCH-$MODEL_ID       # your own branch from implement.md, if you implemented PLAN
+FINAL_BRANCH=$BASE_BRANCH-final     # the improved branch, created on START
+START=<the best branch>             # picked below
 SOURCE_DIR=$PWD                     # git checkout with BASE_BRANCH and the models' branches
-WORKTREE_DIR=$SOURCE_DIR-$MODEL_ID  # your own git worktree, as in implement.md; switched to FINAL_BRANCH
-BUILD_DIR=$SOURCE_DIR-$MODEL_ID-deb-gcc16-rocks  # your build dir, as in implement.md
+PROMPT_DIR=<the directory of this file>  # where implement.md and environment.md are
+WORKTREE_DIR=$SOURCE_DIR-$MODEL_ID  # your own git worktree
+BUILD_DIR=$SOURCE_DIR-$MODEL_ID-deb-gcc16-rocks  # your own build dir
 
 If a required variable is missing, stop and ask for it.
 
-Select the best branch as a base, create FINAL_BRANCH on it, and improve it using
+Select the best branch as a base (START), create FINAL_BRANCH on it, and improve it using
 $COMPARE_FILE. Start from the comparison's `best:` and its "## Best base" reasons.
 If checking the code shows another branch is a better base, use that one and say why
 under `## Deviations`.
 
 Environment rules: those in $PROMPT_DIR/environment.md, and
-- These rules replace implement.md's rules for BRANCH and the worktree. FINAL_BRANCH
-  is a new branch, created on the best branch, not on BASE_BRANCH:
+- Work only in your own git worktree $WORKTREE_DIR, on your own new branch
+  FINAL_BRANCH, created on START:
   - if FINAL_BRANCH already exists (`git -C $SOURCE_DIR rev-parse --verify FINAL_BRANCH`),
     stop and ask; it may hold an earlier run's work.
-  - if $WORKTREE_DIR doesn't exist (you didn't implement PLAN yourself), create it:
-    `git -C $SOURCE_DIR worktree add -b FINAL_BRANCH $WORKTREE_DIR <best branch>`
-  - if it exists, it is on your own branch from implement.md. If it has uncommitted
-    changes, stop and ask. Otherwise switch it, leaving your own branch as it is:
-    `git -C $WORKTREE_DIR checkout -b FINAL_BRANCH <best branch>`
-  Make all source changes there, on FINAL_BRANCH. Never change
-  BASE_BRANCH or the models' branches (your own included); take code from them with
-  `git cherry-pick`, `git show <branch>:path` or by hand.
-- A build dir from implement.md is reused: ninja rebuilds what FINAL_BRANCH
-  changed.
+  - if $WORKTREE_DIR doesn't exist, create it:
+    `git -C $SOURCE_DIR worktree add -b FINAL_BRANCH $WORKTREE_DIR START`
+  - if it exists, check that it is a worktree of $SOURCE_DIR's repository
+    (`git -C $SOURCE_DIR worktree list`) and has no uncommitted changes (stop and
+    ask if it has), then switch it, leaving the branch it was on as it is:
+    `git -C $WORKTREE_DIR checkout -b FINAL_BRANCH START`
+  Make all source changes there, on FINAL_BRANCH. Never change BASE_BRANCH, BRANCH
+  or other models' branches; take code from them with `git cherry-pick`,
+  `git show <branch>:path` or by hand.
+- Build in $BUILD_DIR as environment.md says. An existing $BUILD_DIR is reused:
+  ninja rebuilds what changed.
 
 Implementation rules
 - Make every change listed under the comparison's "## Improvements" for the branch
@@ -57,7 +60,7 @@ names exactly)
 ---
 model: <MODEL_ID> (improve)
 branch: <FINAL_BRANCH> @ <full SHA>
-from: <the best branch> @ <full SHA>
+from: <START> @ <full SHA>
 base: <BASE_BRANCH> @ <full SHA>
 plan: <PLAN>
 comparison: <COMPARE_FILE>

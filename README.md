@@ -522,20 +522,25 @@ files in `$IMPLEMENT_DIR` (`IMPLEMENT_DIR =
 1. Every checked model creates its own branch `$BASE_BRANCH-$MODEL_ID` on top
    of `BASE_BRANCH` and implements the plan file there, following
    [`commands/implement.md`](commands/implement.md) and
-   [`commands/environment.md`](commands/environment.md), with its worktree
-   on the new branch, and asks for commits with an `Implemented by`
-   trailer and a summary (branch and SHA, build, tests, deviations from the
-   plan, what's not done) in `implement-$MODEL_ID.md`.
+   [`commands/environment.md`](commands/environment.md). It commits with an
+   `Implemented by` trailer and writes a summary (branch and SHA, build,
+   tests, deviations from the plan, what's not done) to
+   `implement-$MODEL_ID.md`.
 2. The coordinator compares the branches, following
    [`commands/implement-compare.md`](commands/implement-compare.md): plan
    coverage, bugs, tests and code of each, which branch is the best base, and
-   what to change in it, in `compare.md`.
-3. The coordinator creates `$BASE_BRANCH-final` on the best branch, in its
-   own worktree and build dir from step 1 (its own branch stays as it is),
-   and makes the changes from the comparison, following
+   what to change in it, in `compare.md`. This step is read-only: it reads
+   the branches with git and doesn't build, run tests, or change any
+   worktree or branch.
+3. The coordinator creates `$BASE_BRANCH-final` on the best branch and makes
+   the changes from the comparison, following
    [`commands/implement-improve.md`](commands/implement-improve.md), adding an
    `Improved by` trailer to each commit it changes, with its summary in
    `final.md`.
+
+Steps 1 and 3 share the same environment rules: their own worktree
+`$SOURCE_DIR-$MODEL_ID`, switched to the step's own new branch (any branch
+it was on stays as it is), and their own build dir next to it.
 
 `/implement PS-11299-trunk
 /work/LLM-plans/PS-11299-port-vector-to-26.07/plan5-Opus-5.5-high.md`, or the

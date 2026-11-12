@@ -5,11 +5,11 @@ PLAN=<plan file>                    # what to implement, e.g. /work/LLM-plans/PS
 OUTPUT_FILE=<summary path>          # e.g. /work/LLM-implementations/PS-11299-trunk/implement-$MODEL_ID.md
 
 Default variables (used unless the caller sets them):
-BRANCH=$BASE_BRANCH-$MODEL_ID       # your own branch, created on top of BASE_BRANCH
-SOURCE_DIR=$PWD                     # git checkout with BASE_BRANCH
-PROMPT_DIR=<the directory of this file>  # where environment.md is
-WORKTREE_DIR=$SOURCE_DIR-$MODEL_ID  # your own git worktree on BRANCH; always used
-BUILD_DIR=$SOURCE_DIR-$MODEL_ID-deb-gcc16-rocks  # your build dir
+BRANCH=$BASE_BRANCH-$MODEL_ID       # your own branch with the implementation, created on BASE_BRANCH
+SOURCE_DIR=$PWD                     # git checkout with BASE_BRANCH and the models' branches
+PROMPT_DIR=<the directory of this file>  # where implement.md and environment.md are
+WORKTREE_DIR=$SOURCE_DIR-$MODEL_ID  # your own git worktree
+BUILD_DIR=$SOURCE_DIR-$MODEL_ID-deb-gcc16-rocks  # your own build dir
 
 If a required variable is missing, stop and ask for it.
 
@@ -19,16 +19,20 @@ will be compared using your summaries, so keep to your own worktree, branch and 
 dir, and make the summary accurate.
 
 Environment rules: those in $PROMPT_DIR/environment.md, and
-- Always work in your own git worktree $WORKTREE_DIR, on BRANCH:
+- Work only in your own git worktree $WORKTREE_DIR, on your own new branch BRANCH,
+  created on BASE_BRANCH:
   - if BRANCH already exists (`git -C $SOURCE_DIR rev-parse --verify BRANCH`),
     stop and ask; it may hold an earlier run's work.
   - if $WORKTREE_DIR doesn't exist, create it:
     `git -C $SOURCE_DIR worktree add -b BRANCH $WORKTREE_DIR BASE_BRANCH`
-  - if it exists, reuse it: check that it is a worktree of $SOURCE_DIR's repository
-    (`git -C $SOURCE_DIR worktree list`), then `git -C $WORKTREE_DIR checkout -b
-    BRANCH BASE_BRANCH`. If it has uncommitted changes from an earlier run, stop and
-    ask before discarding them.
-  Make all source changes there. Never change BASE_BRANCH or other models' branches.
+  - if it exists, check that it is a worktree of $SOURCE_DIR's repository
+    (`git -C $SOURCE_DIR worktree list`) and has no uncommitted changes (stop and
+    ask if it has), then switch it, leaving the branch it was on as it is:
+    `git -C $WORKTREE_DIR checkout -b BRANCH BASE_BRANCH`
+  Make all source changes there, on BRANCH. Never change BASE_BRANCH or other
+  models' branches.
+- Build in $BUILD_DIR as environment.md says. An existing $BUILD_DIR is reused:
+  ninja rebuilds what changed.
 
 Implementation rules
 - Read PLAN fully before changing anything, and follow it. Where it is wrong,
