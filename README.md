@@ -77,7 +77,7 @@ In the prompt composer:
 |---|---|
 | `Enter` | Send to every checked target |
 | `Alt+Enter`, `Shift+Enter`, `Ctrl+J` | New line |
-| `Alt+1`…`Alt+9`, or click `[x] name` in the title | Toggle target N (`Alt+0` toggles all) |
+| `Alt+1`…`Alt+9`, or click `✓name` in the title | Toggle target N (`Alt+0` toggles all) |
 | `Ctrl+A` | Toggle all targets |
 | `↑` / `↓` | Move between lines; past the first or last line, step through prompt history |
 | `Ctrl+U` / `Ctrl+K` / `Ctrl+W` | Delete to line start / line end / previous word |
@@ -85,7 +85,7 @@ In the prompt composer:
 
 A harness with `enabled = false` in the config is not started with
 agent-tabs and has no tab. It is still listed, unchecked, in the prompt boxes
-(the main tab's and `Ctrl+\` `a`). Check it there, by clicking `[ ] name` or
+(the main tab's and `Ctrl+\` `a`). Check it there, by clicking its name or
 with `Alt+N` in the composer, and agent-tabs starts it and shows its tab right
 away. From then on it is treated like any other harness. `--only` starts the
 harnesses it names even when they are disabled.
@@ -217,10 +217,10 @@ comparing, `●` a new comparison you haven't looked at, `!` failed.
 The main tab has its own prompt box at the bottom, always active: type a prompt
 and press `Enter` to send it to every ticked harness. All are ticked at first,
 except disabled harnesses that haven't been started;
-click a `[x] name` label in the box's title to untick or tick one, and the
+click a `✓name` label in the box's title to untick or tick one, and the
 choice is kept for later prompts. A label leaves out the version, the parts of
-the name with a digit (`gpt-6-astra` is `[x] gpt-astra`), unless two would
-then be the same. `[x]` only means "send to this harness"; the
+the name with a digit (`gpt-6-astra` is `✓gpt-astra`), unless two would
+then be the same. `✓` only means "send to this harness"; the
 tab markers show whether a harness is working. You can then watch the round
 progress and read the answers without leaving the tab. The box edits like the
 composer (`Alt+Enter` for a new line, `↑`/`↓` for history, `Esc` to clear), so

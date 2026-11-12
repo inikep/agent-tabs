@@ -1491,7 +1491,7 @@ impl App {
         let names: Vec<&str> = self.panes.iter().map(Pane::name).collect();
         for (i, name) in target_labels(&names).into_iter().enumerate() {
             let on = composer.targets[i];
-            let label = format!("[{}] {name} ", if on { "x" } else { " " });
+            let label = format!("{}{name} ", if on { "✓" } else { " " });
             let width = label.width() as u16;
             hits.push(TargetHit {
                 kind,
@@ -1553,7 +1553,7 @@ impl App {
             Line::from("  Ctrl+\\       send a literal Ctrl+\\ to the harness"),
             Line::from(""),
             Line::from("Mouse: drag with the left button to select text; it's copied on release."),
-            Line::from("Click a [x] target in a prompt box to toggle it; click ✕ exit to quit."),
+            Line::from("Click a ✓target in a prompt box to toggle it; click ✕ exit to quit."),
             Line::from(""),
             Line::from("Prompt composer:").bold(),
             Line::from("  Enter send · Alt+Enter / Ctrl+J newline · Alt+1-9 toggle target"),
@@ -3640,11 +3640,11 @@ mod tests {
         thread::sleep(Duration::from_millis(200));
         app.handle_event(key(KeyCode::Char('1'), KeyModifiers::ALT));
         let rows = buffer_rows(&draw_app(&mut app, 100, 20));
-        let (x, y) = find(&rows, "[x] b");
+        let (x, y) = find(&rows, "✓b");
         click(&mut app, x + 1, y);
         assert_eq!(app.main_input.selected(), [0, 2]);
         let rows = buffer_rows(&draw_app(&mut app, 100, 20));
-        assert!(rows.iter().any(|r| r.contains("[ ] b")), "{rows:#?}");
+        assert!(rows.iter().any(|r| r.contains("✓a  b ✓c")), "{rows:#?}");
         type_text(&mut app, "only a and c");
         app.handle_event(key(KeyCode::Enter, KeyModifiers::NONE));
         wait_for(app.pane(0), "got:only a and c");
@@ -3664,7 +3664,7 @@ mod tests {
         app.handle_event(key(KeyCode::Char('\\'), KeyModifiers::CONTROL));
         app.handle_event(key(KeyCode::Char('a'), KeyModifiers::NONE));
         let rows = buffer_rows(&draw_app(&mut app, 100, 20));
-        let (x, y) = find(&rows, "[x] a");
+        let (x, y) = find(&rows, "✓a");
         click(&mut app, x, y);
         assert_eq!(app.composer.selected(), [1]);
         assert_eq!(app.mode(), Mode::Compose);
@@ -4577,10 +4577,7 @@ mod tests {
         assert_eq!(app.tab_label(0).0, "⚑asks");
         app.handle_event(key(KeyCode::Char('1'), KeyModifiers::ALT));
         let rows = buffer_rows(&draw_app(&mut app, 100, 20));
-        assert!(
-            rows.iter().any(|r| r.contains("[x] asks [x] ready")),
-            "{rows:#?}"
-        );
+        assert!(rows.iter().any(|r| r.contains("✓asks ✓ready")), "{rows:#?}");
         assert!(
             !rows
                 .iter()
@@ -4729,8 +4726,8 @@ mod tests {
         app.handle_event(key(KeyCode::Char('3'), KeyModifiers::ALT));
         assert!(app.on_main(), "Alt+3 is not a hidden tab");
 
-        let (x, y) = find(&rows, "[ ] c");
-        click(&mut app, x + 1, y);
+        let (x, y) = find(&rows, "✓a  b  c");
+        click(&mut app, x + 7, y);
         assert_eq!(
             app.pane(2).status(),
             Status::Running,
