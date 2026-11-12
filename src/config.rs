@@ -220,6 +220,10 @@ pub struct Config {
     pub input_patterns: Vec<String>,
     #[serde(default = "default_working_patterns")]
     pub working_patterns: Vec<String>,
+    /// `[[auto_reply]]`: what to send a harness that stops on a screen
+    /// matching `pattern`, such as codex's "This content can't be shown".
+    #[serde(rename = "auto_reply", default = "default_auto_replies")]
+    pub auto_replies: Vec<AutoReply>,
     /// The main tab's settings, `[main]`; `[summary]`, its old name, is
     /// still accepted.
     #[serde(default, alias = "summary")]
@@ -230,6 +234,22 @@ pub struct Config {
     pub commands: CommandsConfig,
     #[serde(rename = "harness", default = "default_harnesses")]
     pub harnesses: Vec<Harness>,
+}
+
+/// A reply agent-tabs sends by itself when a harness, done working, shows
+/// `pattern` in the last lines of its screen.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AutoReply {
+    pub pattern: String,
+    pub reply: String,
+}
+
+pub fn default_auto_replies() -> Vec<AutoReply> {
+    vec![AutoReply {
+        // codex, when it refuses a request it takes for a cybersecurity one.
+        pattern: r"(?i)this content can.t be shown".into(),
+        reply: "continue".into(),
+    }]
 }
 
 fn default_submit_delay_ms() -> u64 {
@@ -328,6 +348,7 @@ impl Default for Config {
             dialog_patterns: default_dialog_patterns(),
             input_patterns: default_input_patterns(),
             working_patterns: default_working_patterns(),
+            auto_replies: default_auto_replies(),
             main: MainConfig::default(),
             commands: CommandsConfig::default(),
             harnesses: default_harnesses(),
@@ -364,6 +385,7 @@ impl Config {
         self.dialog_regex()?;
         self.input_regex()?;
         self.working_regex()?;
+        self.auto_reply_regexes()?;
         self.commands.validate()?;
         let mut seen = std::collections::HashSet::new();
         for h in &self.harnesses {
@@ -412,6 +434,17 @@ impl Config {
 
     pub fn working_regex(&self) -> Result<regex::RegexSet> {
         regex::RegexSet::new(&self.working_patterns).context("invalid working_patterns")
+    }
+
+    pub fn auto_reply_regexes(&self) -> Result<Vec<(regex::Regex, String)>> {
+        self.auto_replies
+            .iter()
+            .map(|a| {
+                let re = regex::Regex::new(&a.pattern)
+                    .with_context(|| format!("invalid auto_reply pattern {:?}", a.pattern))?;
+                Ok((re, a.reply.clone()))
+            })
+            .collect()
     }
 
     pub fn input_regex(&self) -> Result<regex::RegexSet> {
@@ -502,6 +535,29 @@ mod tests {
             assert!(set.is_match(text), "{text}");
         }
         assert!(!set.is_match("› Ask Codex to do anything"));
+    }
+
+    #[test]
+    fn auto_replies_continue_after_codex_refuses() {
+        let replies = Config::default().auto_reply_regexes().unwrap();
+        let screen = " This content can’t be shown\n  Daybreak isn’t available for Astra.";
+        let (_, reply) = replies.iter().find(|(re, _)| re.is_match(screen)).unwrap();
+        assert_eq!(reply, "continue");
+        let config: Config = toml::from_str(
+            "[[auto_reply]]\npattern = \"Retry\\\\?\"\nreply = \"yes\"\n[[harness]]\nname = \"a\"\ncommand = \"a\"",
+        )
+        .unwrap();
+        assert_eq!(
+            config.auto_replies.len(),
+            1,
+            "the config's list replaces the default"
+        );
+        assert!(config.auto_reply_regexes().unwrap()[0].0.is_match("Retry?"));
+        let bad: Config = toml::from_str(
+            "[[auto_reply]]\npattern = \"(\"\nreply = \"x\"\n[[harness]]\nname = \"a\"\ncommand = \"a\"",
+        )
+        .unwrap();
+        assert!(bad.validate().is_err());
     }
 
     #[test]

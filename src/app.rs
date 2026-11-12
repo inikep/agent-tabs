@@ -29,6 +29,8 @@ use crate::rounds::{Capture, Round, SummaryState, run_summarizer};
 use crate::script::{Command, Step, Targets};
 
 const BUSY_WINDOW: Duration = Duration::from_millis(1500);
+/// How long a harness must be quiet before it gets an `[[auto_reply]]`.
+const AUTO_REPLY_QUIET: Duration = Duration::from_secs(2);
 const SHUTDOWN_GRACE: Duration = Duration::from_millis(1500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +86,11 @@ pub struct App {
     clipboard: Clipboard,
     inputs: regex::RegexSet,
     working: regex::RegexSet,
+    auto_replies: Vec<(regex::Regex, String)>,
+    /// Per harness: whether it got an auto reply for the screen it shows,
+    /// so it gets one reply until the match leaves its screen.
+    auto_replied: Vec<bool>,
+    last_auto_check: Instant,
     main_scroll: u16,
     main_unseen: bool,
     model_patterns: Vec<Vec<regex::Regex>>,
@@ -485,6 +492,9 @@ impl App {
             clipboard,
             inputs: regex::RegexSet::empty(),
             working: regex::RegexSet::empty(),
+            auto_replies: Vec::new(),
+            auto_replied: Vec::new(),
+            last_auto_check: Instant::now(),
             main_scroll: 0,
             main_unseen: false,
             model_patterns: Vec::new(),
@@ -501,6 +511,8 @@ impl App {
         app.dialogs = app.config.dialog_regex()?;
         app.inputs = app.config.input_regex()?;
         app.working = app.config.working_regex()?;
+        app.auto_replies = app.config.auto_reply_regexes()?;
+        app.auto_replied = vec![false; app.config.harnesses.len()];
         app.model_patterns = app
             .config
             .harnesses
@@ -647,6 +659,44 @@ impl App {
             && self.inputs.is_match(&self.panes[index].screen_tail(25))
     }
 
+    /// Sends the `[[auto_reply]]` reply to each harness that is done
+    /// working and shows its pattern near the bottom of its screen, once
+    /// per match. Returns whether it sent any.
+    fn auto_reply(&mut self) -> bool {
+        let mut sent = Vec::new();
+        for i in 0..self.panes.len() {
+            if !matches!(self.panes[i].status(), Status::Running) {
+                continue;
+            }
+            let tail = self.panes[i].screen_tail(15);
+            let Some(reply) = self
+                .auto_replies
+                .iter()
+                .find(|(re, _)| re.is_match(&tail))
+                .map(|(_, reply)| reply.clone())
+            else {
+                self.auto_replied[i] = false;
+                continue;
+            };
+            if self.auto_replied[i]
+                || !self.panes[i].ready_for_prompt()
+                || self.panes[i].is_busy(AUTO_REPLY_QUIET)
+                || self.still_working(i)
+            {
+                continue;
+            }
+            self.auto_replied[i] = true;
+            let delay = Duration::from_millis(self.config.submit_delay_ms);
+            self.panes[i].send_prompt(&reply, delay);
+            sent.push(format!("{} \"{reply}\"", self.panes[i].name()));
+        }
+        if sent.is_empty() {
+            return false;
+        }
+        self.flash(format!("auto reply: {}", sent.join(", ")));
+        true
+    }
+
     fn has_pending(&self, index: usize) -> bool {
         self.pending.iter().any(|(i, _)| *i == index)
     }
@@ -670,6 +720,10 @@ impl App {
             if self.tick_rounds() {
                 redraw = true;
                 self.state_dirty = true;
+            }
+            if self.last_auto_check.elapsed() >= Duration::from_millis(500) {
+                self.last_auto_check = Instant::now();
+                redraw |= self.auto_reply();
             }
             if self.state_dirty && self.last_save.elapsed() >= Duration::from_secs(1) {
                 self.save_state();
@@ -3325,6 +3379,7 @@ mod tests {
             dialog_patterns: crate::config::default_dialog_patterns(),
             input_patterns: crate::config::default_input_patterns(),
             working_patterns: crate::config::default_working_patterns(),
+            auto_replies: crate::config::default_auto_replies(),
             main: test_main_config(),
             commands: Default::default(),
             harnesses,
@@ -3706,6 +3761,20 @@ mod tests {
     }
 
     #[test]
+    fn a_matching_screen_gets_its_auto_reply_once() {
+        let script = format!("printf '\\033[?2004hThis content can’t be shown\\r\\n'; {ECHO_LOOP}");
+        let mut app = app_with(vec![script_harness("codex", &script), cat_harness("b")]);
+        wait_for(app.pane(0), "be shown");
+        assert!(!app.auto_reply(), "not while it may still be working");
+        thread::sleep(AUTO_REPLY_QUIET);
+        assert!(app.auto_reply());
+        wait_for(app.pane(0), "got:continue");
+        thread::sleep(AUTO_REPLY_QUIET);
+        assert!(!app.auto_reply(), "one reply while the match is on screen");
+        assert!(!screen(app.pane(1)).contains("continue"));
+    }
+
+    #[test]
     fn clicking_a_target_in_the_composer_toggles_it() {
         let mut app = app(&["a", "b"]);
         app.handle_event(key(KeyCode::Char('\\'), KeyModifiers::CONTROL));
@@ -3730,6 +3799,7 @@ mod tests {
             dialog_patterns: crate::config::default_dialog_patterns(),
             input_patterns: crate::config::default_input_patterns(),
             working_patterns: crate::config::default_working_patterns(),
+            auto_replies: crate::config::default_auto_replies(),
             main: test_main_config(),
             commands: Default::default(),
             harnesses: vec![script_harness("p", "printf 'args:%s' \"$*\"; sleep 5")],
@@ -4680,6 +4750,7 @@ mod tests {
             dialog_patterns: crate::config::default_dialog_patterns(),
             input_patterns: crate::config::default_input_patterns(),
             working_patterns: crate::config::default_working_patterns(),
+            auto_replies: crate::config::default_auto_replies(),
             main: test_main_config(),
             commands: Default::default(),
             harnesses: names.iter().map(|n| cat_harness(n)).collect(),
@@ -4891,6 +4962,7 @@ mod tests {
             dialog_patterns: crate::config::default_dialog_patterns(),
             input_patterns: crate::config::default_input_patterns(),
             working_patterns: crate::config::default_working_patterns(),
+            auto_replies: crate::config::default_auto_replies(),
             main: test_main_config(),
             commands: Default::default(),
             harnesses: vec![cat_harness("a")],

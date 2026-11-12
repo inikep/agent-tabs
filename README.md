@@ -610,6 +610,10 @@ input_patterns = [
   "(?i)would you like to (run|make|apply|allow)",
 ]
 
+[[auto_reply]]
+pattern = "(?i)this content can.t be shown"
+reply = "continue"
+
 [main]
 compare = false
 command = "claude"
@@ -651,6 +655,12 @@ command = "cursor-agent"
 env = { EXAMPLE_VAR = "value" }
 env_remove = ["CLAUDECODE"]
 ```
+
+`[[auto_reply]]` sends `reply` by itself to a harness that has been quiet for
+2 seconds, isn't working, and shows `pattern` in the last 15 lines of its
+screen, once until the match leaves those lines; the status line says so.
+The default answers codex's "This content can't be shown" refusal with
+`continue`. An `[[auto_reply]]` in the config replaces the default list.
 
 Each harness runs with `TERM=xterm-256color`, `COLORTERM=truecolor` and
 `TERM_PROGRAM=agent-tabs`. Variables describing the outer terminal (`TMUX`,
