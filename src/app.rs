@@ -1559,7 +1559,7 @@ impl App {
         let names: Vec<&str> = self.panes.iter().map(Pane::name).collect();
         for (i, name) in target_labels(&names).into_iter().enumerate() {
             let on = composer.targets[i];
-            let label = format!("{}{name} ", if on { "✓" } else { " " });
+            let label = format!("{}{name} ", if on { "✓" } else { "" });
             let width = label.width() as u16;
             hits.push(TargetHit {
                 kind,
@@ -3713,7 +3713,7 @@ mod tests {
         click(&mut app, x + 1, y);
         assert_eq!(app.main_input.selected(), [0, 2]);
         let rows = buffer_rows(&draw_app(&mut app, 100, 20));
-        assert!(rows.iter().any(|r| r.contains("✓a  b ✓c")), "{rows:#?}");
+        assert!(rows.iter().any(|r| r.contains("✓a b ✓c")), "{rows:#?}");
         type_text(&mut app, "only a and c");
         app.handle_event(key(KeyCode::Enter, KeyModifiers::NONE));
         wait_for(app.pane(0), "got:only a and c");
@@ -4838,8 +4838,8 @@ mod tests {
         app.handle_event(key(KeyCode::Char('3'), KeyModifiers::ALT));
         assert!(app.on_main(), "Alt+3 is not a hidden tab");
 
-        let (x, y) = find(&rows, "✓a  b  c");
-        click(&mut app, x + 7, y);
+        let (x, y) = find(&rows, "✓a b c");
+        click(&mut app, x + 5, y);
         assert_eq!(
             app.pane(2).status(),
             Status::Running,
