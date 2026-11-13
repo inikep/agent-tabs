@@ -38,7 +38,7 @@ All harnesses start in the current directory, or in `--cwd DIR`.
 ### `--yolo`
 
 `agent-tabs --yolo` (or `yolo = true` in the config) starts every harness in its
-own "approve everything" mode, and shows a red `YOLO` badge at the right end of the status line:
+own "approve everything" mode, and shows a dim red `YOLO` next to the tab name in the status line:
 
 | Harness | Added flag | Removed from its args |
 |---|---|---|

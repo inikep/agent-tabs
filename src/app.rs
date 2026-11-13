@@ -1421,22 +1421,15 @@ impl App {
     /// The status line, and above it, an error too long for that line in
     /// full, so it isn't cut off.
     fn draw_status(&self, frame: &mut Frame, status_area: Rect) {
-        let mut line_area = status_area;
+        let mut line = self.status_line();
         if self.config.yolo {
-            let badge = " YOLO ";
-            let badge_width = (badge.width() as u16).min(status_area.width);
-            line_area.width -= badge_width;
-            frame.render_widget(
-                Paragraph::new(Span::styled(
-                    badge,
-                    Style::default().white().on_red().bold(),
-                )),
-                Rect::new(line_area.right(), status_area.y, badge_width, 1),
-            );
+            // Right after the model (or mode) badge, in plain red so it
+            // doesn't outshine the badge.
+            let at = line.spans.len().min(1);
+            line.spans.insert(at, Span::raw(" YOLO").red());
         }
-        let line = self.status_line();
-        let cut = line.width() > usize::from(line_area.width);
-        frame.render_widget(Paragraph::new(line), line_area);
+        let cut = line.width() > usize::from(status_area.width);
+        frame.render_widget(Paragraph::new(line), status_area);
         let Some((text, _, true)) = &self.message else {
             return;
         };
@@ -3824,7 +3817,7 @@ mod tests {
             !rows[0].contains("YOLO") && rows[0].ends_with("✕exit"),
             "{rows:#?}"
         );
-        assert!(rows[9].ends_with(" YOLO "), "{rows:#?}");
+        assert!(rows[9].starts_with(" main  YOLO "), "{rows:#?}");
     }
 
     #[test]
