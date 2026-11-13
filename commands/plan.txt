@@ -11,6 +11,7 @@
 ::send all
 OUTPUT_FILE=$PLAN_DIR/plan-$MODEL_ID.md
 Don't build, and don't run tests or the server; plan from the code and git history only.
+Before anything else, record the start time with `date '+%F %T %Z'`. End the plan with `started:`, `finished:` (when you wrote it) and `duration:` (finished minus started, e.g. 1h05m).
 In $OUTPUT_FILE create a plan to $TASK
 ::wait-model-files $OUTPUT_FILE
 
@@ -18,7 +19,8 @@ In $OUTPUT_FILE create a plan to $TASK
 ::send $COORDINATOR
 PLAN_FILES=$PLAN_DIR/plan-*.md
 OUTPUT_FILE=$PLAN_DIR/plan2-final-$MODEL_ID.md
+PLAN_RANKING=$PLAN_DIR/plan2-ranking-$MODEL_ID.md
 Don't build, and don't run tests or the server; plan from the code and git history only.
 Select the best plan from $PLAN_FILES as a base, improve it using the other plans and create $OUTPUT_FILE
-Rank plans at the end.
+Rank plans and write to $PLAN_RANKING with duration.
 ::wait-model-files $OUTPUT_FILE

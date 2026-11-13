@@ -1,7 +1,7 @@
 Required variables (the caller must set these):
 MODEL_ID=<Model-X.Y-level>          # your own model, version and reasoning level, e.g. Opus-5.5-high
 REVIEW_FILES=<report files or glob> # reports to merge, e.g. /data/sh/LLM/reviews/PS-11934-8.4-H07/review-*.md
-REVIEW_COMBINED=<report path>       # merged report, e.g. /data/sh/LLM/reviews/PS-11934-8.4-H07/review-combined.md
+REVIEW_COMBINED=<report path>       # merged report, e.g. /data/sh/LLM/reviews/PS-11934-8.4-H07/review2-combined-opus-5.5.md
 
 Default variables (used unless the caller sets them):
 SOURCE_DIR=$PWD                     # git checkout with the reviewed target
@@ -14,7 +14,6 @@ Merge the reviews in $REVIEW_FILES into $REVIEW_COMBINED. All reports must
 review the same range: check that their target and base SHAs match and stop if
 they don't. Below, TARGET means the target in the reports' front matter.
 The reports follow the format in review.md, and so does this one where it applies.
-Don't merge $REVIEW_COMBINED itself if $REVIEW_FILES matches it.
 
 Environment: follow $PROMPT_DIR/environment.md. To check a finding by running
 something, use your own worktree and build dir, with the worktree detached at

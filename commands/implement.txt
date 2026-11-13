@@ -8,9 +8,9 @@
 ::# The models work from SOURCE_DIR, the git checkout with BASE_BRANCH, by default the directory
 ::# agent-tabs runs in. SOURCE_DIR=/path before NOTES changes it.
 ::#
-::# Example: /implement PS-12000-8.4 /work/LLM-plans/PS-12000/plan-Opus-5.5-high.md
+::# Example: /implement PS-12000-8.4 /work/LLM-plans/PS-12000/plan2-final-Opus-5.5-high.md
 ::#
-::# Example: /implement PS-11299-trunk PLAN=/work/LLM-plans/PS-11299-port-vector/plan4-Opus-5.5-high.md
+::# Example: /implement PS-11299-trunk PLAN=/work/LLM-plans/PS-11299-port-vector/plan5-Opus-5.5-high.md
 ::args BASE_BRANCH PLAN [NOTES...]
 
 ::# 1. Every model implements the plan on its own branch
@@ -24,18 +24,19 @@ $NOTES
 ::# 2. The coordinator compares implementations (branches)
 ::send $COORDINATOR
 IMPLEMENT_FILES=$IMPLEMENT_DIR/implement-*.md
-OUTPUT_FILE=$IMPLEMENT_DIR/compare.md
+OUTPUT_FILE=$IMPLEMENT_DIR/compare-$MODEL_ID.md
+IMPLEMENT_RANKING=$IMPLEMENT_DIR/compare-ranking-$MODEL_ID.md
 Read environment rules from $PROMPT_DIR/environment.md
 Read instructions from $PROMPT_DIR/implement-compare.md
-Rank implementations at the end.
+Rank implementations and write to $IMPLEMENT_RANKING with duration.
 $NOTES
-::wait-file $OUTPUT_FILE
+::wait-model-files $OUTPUT_FILE
 
-::# 3. The coordinator selects best base branch and improves it using comparison
+::# 3. The coordinator selects the best base branch and improves it using the comparison
 ::send $COORDINATOR
-COMPARE_FILE=$IMPLEMENT_DIR/compare.md
-OUTPUT_FILE=$IMPLEMENT_DIR/final.md
+COMPARE_FILE=$IMPLEMENT_DIR/compare-$MODEL_ID.md
+OUTPUT_FILE=$IMPLEMENT_DIR/final-$MODEL_ID.md
 Read environment rules from $PROMPT_DIR/environment.md
 Read instructions from $PROMPT_DIR/implement-improve.md
 $NOTES
-::wait-file $OUTPUT_FILE
+::wait-model-files $OUTPUT_FILE

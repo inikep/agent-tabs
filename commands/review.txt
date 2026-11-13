@@ -22,9 +22,10 @@ $NOTES
 ::# The coordinator merges the reviews
 ::send $COORDINATOR
 REVIEW_FILES=$REVIEW_DIR/review-*.md
-REVIEW_COMBINED=$REVIEW_DIR/review-combined.md
+REVIEW_COMBINED=$REVIEW_DIR/review2-combined-$MODEL_ID.md
+REVIEW_RANKING=$REVIEW_DIR/review2-ranking-$MODEL_ID.md
 Read environment rules from $PROMPT_DIR/environment.md
 Read instructions from $PROMPT_DIR/review-merge.md
+Rank reviews and write to $REVIEW_RANKING with duration.
 $NOTES
-Rank reviews at the end.
-::wait-file $REVIEW_COMBINED
+::wait-model-files $REVIEW_COMBINED

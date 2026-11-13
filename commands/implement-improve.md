@@ -2,8 +2,8 @@ Required variables (the caller must set these):
 MODEL_ID=<Model-X.Y-level>          # your own model, version and reasoning level, e.g. Opus-5.5-high
 BASE_BRANCH=<branch>                # the branch the implementations are built on, e.g. PS-11299-trunk
 PLAN=<plan file>                    # the plan they implement
-COMPARE_FILE=<comparison path>      # from implement-compare.md, e.g. /work/LLM-implementations/PS-11299-trunk/compare.md
-OUTPUT_FILE=<summary path>          # e.g. /work/LLM-implementations/PS-11299-trunk/final.md
+COMPARE_FILE=<comparison path>      # from implement-compare.md, e.g. /work/LLM-implementations/PS-11299-trunk/compare-opus-5.5.md
+OUTPUT_FILE=<summary path>          # e.g. /work/LLM-implementations/PS-11299-trunk/final-opus-5.5.md
 
 Default variables (used unless the caller sets them):
 BRANCH=$BASE_BRANCH-$MODEL_ID       # your own branch from implement.md, if you implemented PLAN

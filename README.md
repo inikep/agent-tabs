@@ -311,7 +311,7 @@ REVIEW_FILES=$REVIEW_DIR/review-*.md
 REVIEW_COMBINED=$REVIEW_DIR/review-combined.md
 Read instructions from /work/review/agent-tabs/commands/review-merge.md
 
-::wait-file $REVIEW_COMBINED
+::wait-model-files $REVIEW_COMBINED
 
 ::# 3. Opus fixes the issues
 ::send opus-5.5
@@ -402,12 +402,13 @@ $NOTES
 ::# The coordinator merges the reviews
 ::send $COORDINATOR
 REVIEW_FILES=$REVIEW_DIR/review-*.md
-REVIEW_COMBINED=$REVIEW_DIR/review-combined.md
+REVIEW_COMBINED=$REVIEW_DIR/review2-combined-$MODEL_ID.md
+REVIEW_RANKING=$REVIEW_DIR/review2-ranking-$MODEL_ID.md
 Read environment rules from $PROMPT_DIR/environment.md
 Read instructions from $PROMPT_DIR/review-merge.md
+Rank reviews and write to $REVIEW_RANKING with duration.
 $NOTES
-Rank reviews at the end.
-::wait-file $REVIEW_COMBINED
+::wait-model-files $REVIEW_COMBINED
 ```
 
 ```toml
@@ -494,16 +495,17 @@ and only the prompts it points to use `SOURCE_DIR`.
 `$PLAN_DIR/plan-$MODEL_ID.md` (`PLAN_DIR = "/work/LLM-plans/$TARGET"` under
 `[commands.variables]`), then has `$COORDINATOR` pick the best plan as a
 base and improve it using the other plans, into
-`$PLAN_DIR/plan2-final-$MODEL_ID.md` with its own `MODEL_ID`, ranking the
-plans at the end. Every step tells the models not to build or run tests or
-the server, but to plan from the code and git history only; so does
-`/plan-full`.
+`$PLAN_DIR/plan2-final-$MODEL_ID.md` with its own `MODEL_ID`, and rank the
+plans, with their durations, in `$PLAN_DIR/plan2-ranking-$MODEL_ID.md`. Each
+first plan ends with its `started:`, `finished:` and `duration:` for that.
+Every step tells the models not to build or run tests or the server, but to
+plan from the code and git history only; so does `/plan-full`.
 
 `/plan-full TARGET TASK...` takes longer: after the first plans, every
 checked model improves its plan from all plans, compares the improved
 plans, improves its plan from the comparisons, and finally picks the best
-plan as a base and improves it, each step into its own files: `plan-`,
-`plan2-`, `compare-`, `plan3-` and `plan4-$MODEL_ID.md`.
+plan as a base and improves it, each step into its own files: `plan1-`,
+`plan2-`, `plan3-compare-`, `plan4-` and `plan5-$MODEL_ID.md`.
 `/plan PS-11940-merge-26.10 implement option B` sends, besides any other
 `[commands.variables]`,
 
@@ -512,6 +514,8 @@ TARGET=PS-11940-merge-26.10
 TASK=implement option B
 PLAN_DIR=/work/LLM-plans/$TARGET
 OUTPUT_FILE=$PLAN_DIR/plan-$MODEL_ID.md
+Don't build, and don't run tests or the server; plan from the code and git history only.
+Before anything else, record the start time with `date '+%F %T %Z'`. End the plan with ...
 In $OUTPUT_FILE create a plan to $TASK
 ```
 
@@ -531,14 +535,16 @@ files in `$IMPLEMENT_DIR` (`IMPLEMENT_DIR =
 2. The coordinator compares the branches, following
    [`commands/implement-compare.md`](commands/implement-compare.md): plan
    coverage, bugs, tests and code of each, which branch is the best base, and
-   what to change in it, in `compare.md`. This step is read-only: it reads
+   what to change in it, in `compare-$MODEL_ID.md` with the coordinator's own
+   `MODEL_ID`, and ranks the implementations, with their durations, in
+   `compare-ranking-$MODEL_ID.md`. This step is read-only: it reads
    the branches with git and doesn't build, run tests, or change any
    worktree or branch.
 3. The coordinator creates `$BASE_BRANCH-final` on the best branch and makes
    the changes from the comparison, following
    [`commands/implement-improve.md`](commands/implement-improve.md), adding an
    `Improved by` trailer to each commit it changes, with its summary in
-   `final.md`.
+   `final-$MODEL_ID.md`.
 
 Steps 1 and 3 share the same environment rules: their own worktree
 `$SOURCE_DIR-$MODEL_ID`, switched to the step's own new branch (any branch

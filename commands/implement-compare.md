@@ -3,7 +3,7 @@ MODEL_ID=<Model-X.Y-level>          # your own model, version and reasoning leve
 BASE_BRANCH=<branch>                # the branch the implementations are built on, e.g. PS-11299-trunk
 PLAN=<plan file>                    # the plan they implement
 IMPLEMENT_FILES=<summary files or glob>  # each model's summary from implement.md, e.g. /work/LLM-implementations/PS-11299-trunk/implement-*.md
-OUTPUT_FILE=<report path>           # the comparison, e.g. /work/LLM-implementations/PS-11299-trunk/compare.md
+OUTPUT_FILE=<report path>           # the comparison, e.g. /work/LLM-implementations/PS-11299-trunk/compare-opus-5.5.md
 
 Default variables (used unless the caller sets them):
 BRANCH=$BASE_BRANCH-$MODEL_ID       # your own branch from implement.md, if you implemented PLAN
@@ -53,6 +53,7 @@ branches: <branch @ short SHA, comma-separated, one per summary>
 best: <the branch to use as the base>
 started: <YYYY-MM-DD HH:MM:SS TZ, when you received the prompt>
 finished: <YYYY-MM-DD HH:MM:SS TZ, when you wrote the comparison>
+duration: <finished minus started, in hours and minutes, e.g. 1h05m>
 sources: <the summary files compared>
 ---
 

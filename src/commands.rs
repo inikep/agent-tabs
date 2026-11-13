@@ -531,8 +531,8 @@ mod tests {
         );
         assert_eq!(steps[2].line, "::send opus-5.5");
         assert_eq!(
-            steps[3].command.path(None).unwrap(),
-            "/r/PS-2-8.4/review-combined.md"
+            steps[3].command.path(Some("Opus-5.5-high")).unwrap(),
+            "/r/PS-2-8.4/review2-combined-Opus-5.5-high.md"
         );
     }
 
@@ -621,7 +621,7 @@ mod tests {
             text.ends_with("In $OUTPUT_FILE create a plan to $TASK"),
             "{text}"
         );
-        assert_eq!(steps[9].command.path(Some("M")).unwrap(), "/x/plan4-M.md");
+        assert_eq!(steps[9].command.path(Some("M")).unwrap(), "/x/plan5-M.md");
         let (text, _) = fill_plan(&["PS-1", "use", "X=1"]).unwrap().unwrap();
         assert!(text.contains("\nTASK=use X=1\n"), "{text}");
         let usage = "usage: /plan-full TARGET TASK... [NAME=value…]";
@@ -708,8 +708,8 @@ mod tests {
             waits,
             [
                 "/i/PS-1-trunk/implement-Opus-5.5-high.md",
-                "/i/PS-1-trunk/compare.md",
-                "/i/PS-1-trunk/final.md"
+                "/i/PS-1-trunk/compare-Opus-5.5-high.md",
+                "/i/PS-1-trunk/final-Opus-5.5-high.md"
             ]
         );
 
@@ -780,7 +780,7 @@ mod tests {
             sends[0]
         );
         assert!(
-            sends[1].contains("review-merge.md\nDon't build. extra/libkmip is checked\n"),
+            sends[1].ends_with("\nDon't build. extra/libkmip is checked"),
             "{}",
             sends[1]
         );
