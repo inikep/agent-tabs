@@ -90,6 +90,7 @@ fn main() -> Result<()> {
             .with_context(|| format!("working directory {}", dir.display()))?,
         None => std::env::current_dir()?,
     };
+    config.choose_models(&cwd, |line| eprintln!("agent-tabs: {line}"));
     let state_path = state::path_for(&cwd);
 
     let mut terminal = ratatui::init();

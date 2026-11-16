@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -21,6 +23,10 @@ pub struct Harness {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_patterns: Option<Vec<String>>,
+    /// Models to try in order, e.g. `["mythos", "fable"]`: the harness starts
+    /// with the first one it can use, checked when agent-tabs starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strip_right_panel: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -86,7 +92,105 @@ pub fn default_model_patterns(command: &str) -> Vec<String> {
     patterns.iter().map(|p| p.to_string()).collect()
 }
 
+/// The arguments that ask `command` for one short answer from `model`, to
+/// check that the harness can use it, or None for a harness agent-tabs can't
+/// check.
+fn model_check_args(command: &str, model: &str) -> Option<Vec<String>> {
+    let args: &[&str] = match program_name(command) {
+        "claude" => &[
+            "-p",
+            "--model",
+            model,
+            "--output-format",
+            "json",
+            "--tools",
+            "",
+            "--strict-mcp-config",
+            "--no-session-persistence",
+            "--system-prompt",
+            "Reply with OK.",
+            "OK",
+        ],
+        _ => return None,
+    };
+    Some(args.iter().map(|a| a.to_string()).collect())
+}
+
+/// The name of a harness that starts with `model`, in the style of the
+/// other harness names: `claude-mythos-5-2` is `mythos-5.2`, and
+/// `claude-opus-4-8-20251001` is `opus-4.8`.
+fn harness_name_for(model: &str) -> String {
+    let model = model.strip_prefix("claude-").unwrap_or(model);
+    let version = regex::Regex::new(r"-(\d+)-(\d+)(?:-\d{8})?$").expect("valid regex");
+    version.replace(model, "-$1.$2").into_owned()
+}
+
+const MODEL_CHECK_TIMEOUT: Duration = Duration::from_secs(60);
+
 impl Harness {
+    /// The harness with `--model model` in place of any `--model` in its args.
+    pub fn with_model(&self, model: &str) -> Harness {
+        let mut args = vec!["--model".to_string(), model.to_string()];
+        let mut rest = self.args.iter();
+        while let Some(arg) = rest.next() {
+            if arg == "--model" {
+                rest.next();
+            } else if !arg.starts_with("--model=") {
+                args.push(arg.clone());
+            }
+        }
+        Harness {
+            args,
+            ..self.clone()
+        }
+    }
+
+    /// Whether the harness answers a short prompt with `model` in `cwd`.
+    fn can_use_model(&self, model: &str, cwd: &Path) -> bool {
+        let Some(args) = model_check_args(&self.command, model) else {
+            return false;
+        };
+        let mut command = Command::new(&self.command);
+        command
+            .args(args)
+            .current_dir(cwd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        for name in &self.env_remove {
+            command.env_remove(name);
+        }
+        command.envs(&self.env);
+        let Ok(mut child) = command.spawn() else {
+            return false;
+        };
+        let started = Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return status.success(),
+                Ok(None) if started.elapsed() < MODEL_CHECK_TIMEOUT => {
+                    std::thread::sleep(Duration::from_millis(100))
+                }
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+            }
+        }
+    }
+
+    /// The first of `models` the harness can use; the last one when none of
+    /// the others works, without checking it.
+    fn choose_model(&self, models: &[String], cwd: &Path) -> String {
+        let (last, others) = models.split_last().expect("validated as non-empty");
+        others
+            .iter()
+            .find(|model| self.can_use_model(model, cwd))
+            .unwrap_or(last)
+            .clone()
+    }
+
     pub fn with_yolo(&self) -> Harness {
         let extra: Vec<String> = match &self.yolo_args {
             Some(args) => args.clone(),
@@ -401,6 +505,15 @@ impl Config {
                 "duplicate harness name {}",
                 h.name
             );
+            if let Some(models) = &h.models {
+                anyhow::ensure!(!models.is_empty(), "harness {} has empty models", h.name);
+                anyhow::ensure!(
+                    models.len() == 1 || model_check_args(&h.command, "m").is_some(),
+                    "harness {}: agent-tabs can check models only for claude, not {}",
+                    h.name,
+                    h.command
+                );
+            }
         }
         Ok(())
     }
@@ -426,6 +539,49 @@ impl Config {
             harness.enabled = None;
         }
         Ok(())
+    }
+
+    /// Gives each harness with `models` the first one it can use, checking
+    /// them all at once. `report` is told what is checked and what is chosen.
+    pub fn choose_models(&mut self, cwd: &Path, report: impl Fn(&str)) {
+        let choices: Vec<(usize, String)> = std::thread::scope(|scope| {
+            let checks: Vec<_> = self
+                .harnesses
+                .iter()
+                .enumerate()
+                .filter_map(|(i, harness)| {
+                    let models = harness.models.as_ref()?;
+                    if models.len() > 1 {
+                        report(&format!(
+                            "{}: checking which model it can use: {}",
+                            harness.name,
+                            models.join(", ")
+                        ));
+                    }
+                    Some((i, scope.spawn(move || harness.choose_model(models, cwd))))
+                })
+                .collect();
+            checks
+                .into_iter()
+                .map(|(i, check)| (i, check.join().expect("model check panicked")))
+                .collect()
+        });
+        for (i, model) in choices {
+            let name = harness_name_for(&model);
+            let taken = self
+                .harnesses
+                .iter()
+                .enumerate()
+                .any(|(j, other)| j != i && other.name == name);
+            let harness = &mut self.harnesses[i];
+            if harness.models.as_ref().is_some_and(|m| m.len() > 1) {
+                report(&format!("{}: using {model}", harness.name));
+            }
+            *harness = harness.with_model(&model);
+            if !taken {
+                harness.name = name;
+            }
+        }
     }
 
     pub fn dialog_regex(&self) -> Result<regex::RegexSet> {
@@ -742,6 +898,84 @@ mod tests {
             custom.with_yolo().args,
             ["--permission-mode", "bypassPermissions"]
         );
+    }
+
+    #[test]
+    fn with_model_replaces_the_model_arg() {
+        let mut claude = harness("c", "claude");
+        claude.args = vec![
+            "--model".into(),
+            "fable".into(),
+            "--effort".into(),
+            "high".into(),
+            "--model=opus".into(),
+        ];
+        assert_eq!(
+            claude.with_model("mythos").args,
+            ["--model", "mythos", "--effort", "high"]
+        );
+        assert_eq!(
+            harness("c", "claude").with_model("fable").args,
+            ["--model", "fable"]
+        );
+    }
+
+    #[test]
+    fn choose_models_falls_back_to_the_last_model() {
+        let mut config = Config::default();
+        let mut missing = harness("missing", "/nonexistent/claude");
+        missing.models = Some(vec!["mythos".into(), "fable".into()]);
+        let mut single = harness("single", "claude");
+        single.models = Some(vec!["opus".into()]);
+        config.harnesses = vec![missing, single];
+        let reports = std::sync::Mutex::new(Vec::new());
+        config.choose_models(Path::new("/"), |r| {
+            reports.lock().unwrap().push(r.to_string())
+        });
+        assert_eq!(config.harnesses[0].args, ["--model", "fable"]);
+        assert_eq!(config.harnesses[0].name, "fable");
+        assert_eq!(config.harnesses[1].args, ["--model", "opus"]);
+        assert_eq!(config.harnesses[1].name, "opus");
+        assert_eq!(
+            reports.into_inner().unwrap(),
+            [
+                "missing: checking which model it can use: mythos, fable",
+                "missing: using fable"
+            ]
+        );
+    }
+
+    #[test]
+    fn harnesses_are_named_after_their_models() {
+        assert_eq!(harness_name_for("claude-mythos-5-2"), "mythos-5.2");
+        assert_eq!(harness_name_for("claude-opus-4-8-20251001"), "opus-4.8");
+        assert_eq!(harness_name_for("fable"), "fable");
+        assert_eq!(harness_name_for("gpt-6.1-sol"), "gpt-6.1-sol");
+    }
+
+    #[test]
+    fn a_model_name_another_harness_has_keeps_the_configured_name() {
+        let mut config = Config::default();
+        let mut top = harness("top", "/nonexistent/claude");
+        top.models = Some(vec!["claude-mythos-5-2".into(), "opus".into()]);
+        config.harnesses = vec![top, harness("opus", "claude")];
+        config.choose_models(Path::new("/"), |_| {});
+        assert_eq!(config.harnesses[0].name, "top");
+        assert_eq!(config.harnesses[0].args, ["--model", "opus"]);
+    }
+
+    #[test]
+    fn models_are_validated() {
+        let mut config = Config::default();
+        config.harnesses[0].models = Some(Vec::new());
+        assert!(config.validate().is_err());
+        let mut config = Config::default();
+        config.harnesses[1].models = Some(vec!["a".into(), "b".into()]);
+        assert!(config.validate().is_err(), "codex models can't be checked");
+        config.harnesses[1].models = Some(vec!["a".into()]);
+        config.validate().unwrap();
+        config.harnesses[0].models = Some(vec!["mythos".into(), "fable".into()]);
+        config.validate().unwrap();
     }
 
     #[test]

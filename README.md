@@ -683,6 +683,26 @@ screen, once until the match leaves those lines; the status line says so.
 The default answers codex's "This content can't be shown" refusal with
 `continue`. An `[[auto_reply]]` in the config replaces the default list.
 
+`models` on a claude harness lists models to try in order. When agent-tabs
+starts, it asks `claude -p --model …` for a one-word answer with each model
+but the last, all harnesses at once, and starts the harness with
+`--model` set to the first one that answers, in place of any `--model` in
+its `args`. If none answers, it uses the last model without checking it.
+This takes a few seconds:
+
+```toml
+[[harness]]
+name = "claude-top"
+command = "claude"
+models = ["claude-mythos-5-2", "claude-fable-5-2"]
+args = ["--effort", "high"]
+```
+
+The tab and the prompt boxes then name the harness after its model, e.g.
+`mythos-5.2` for `claude-mythos-5-2` (`claude-` and a date at the end are
+left out), unless another harness already has that name. Use the configured
+name, `claude-top` here, with `--only`.
+
 Each harness runs with `TERM=xterm-256color`, `COLORTERM=truecolor` and
 `TERM_PROGRAM=agent-tabs`. Variables describing the outer terminal (`TMUX`,
 `TERM_PROGRAM`, `KITTY_WINDOW_ID`, `WEZTERM_PANE`, …) are removed, because the
