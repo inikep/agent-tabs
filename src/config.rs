@@ -374,7 +374,9 @@ fn default_osc52() -> bool {
 
 pub fn default_working_patterns() -> Vec<String> {
     [
-        r"(?i)\bstill running\b",
+        // claude's status line: `… · 1 shell, 1 monitor still running`, not
+        // a model's own words, such as "the test is still running".
+        r"(?im)·[^·\n]*\bstill running\s*$",
         r"(?i)\besc to interrupt\b",
         // agy's step for a command it is still running (`● Ran` once done).
         r"(?m)^\s*○ Running\b",
@@ -996,6 +998,13 @@ mod tests {
             assert!(set.is_match(text), "{text}");
         }
         assert!(!set.is_match("✻ Churned for 3s · done 6:38 PM"));
+        assert!(
+            !set.is_match(
+                "• The last Valgrind test is still running; I’m waiting for its shutdown summary.\n\n■ This content can’t be shown"
+            ),
+            "a model saying something is still running"
+        );
+        assert!(!set.is_match("  the build is still running"));
     }
 
     #[test]

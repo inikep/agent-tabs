@@ -161,9 +161,10 @@ Whenever you send a prompt to two or more harnesses, agent-tabs starts a
    you want to proceed?" or agy's "Run this command?"). A harness that exits
    also counts as done. A harness whose screen matches `working_patterns` is
    still working in the background, even when quiet, and is not done yet. By
-   default these are `still running` (claude's "1 shell, 1 monitor still
-   running"), `esc to interrupt`, and agy's `○ Running (…)` step for a command
-   it hasn't finished. If a round takes longer than `wait_timeout_secs`, or you
+   default these are a line ending in `still running` after a `·` (claude's
+   "… · 1 shell, 1 monitor still running"; a model writing "the test is still
+   running" doesn't count), `esc to interrupt`, and agy's `○ Running (…)` step
+   for a command it hasn't finished. If a round takes longer than `wait_timeout_secs`, or you
    press `Ctrl+R` before every harness is done, whatever is on screen is used
    and marked as unfinished. agent-tabs keeps watching those harnesses: when
    one finishes, its section is updated, and once every answer is complete a
