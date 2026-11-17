@@ -74,6 +74,23 @@ needs no worktree.
    - origin / commit / at_base: as in review.md; if reviewers disagree, or a reviewer
      says "introduced" without showing BASE's behaviour, settle it (run the scenario
      at BASE if you can) and say how
+   - author: oracle | percona | both — who wrote the defective code, decided
+     from git, not from the file's name or copyright header:
+     - Find the upstream MySQL release TARGET is based on:
+       `git -C $SOURCE_DIR describe --tags --abbrev=0 --match 'mysql-[0-9]*' TARGET`
+       (Oracle's release tags, e.g. mysql-8.4.9).
+     - Blame the defective lines at TARGET
+       (`git -C $SOURCE_DIR blame -L <lines> TARGET -- <path>`) and, for each
+       commit it names, check `git -C $SOURCE_DIR merge-base --is-ancestor
+       <commit> <tag>`: an ancestor of the tag is oracle, any other commit is
+       percona. Compare `git show <tag>:<path>` with TARGET to confirm.
+     - oracle: the defect is in that release unchanged; both: Percona changed
+       Oracle's code and the defect needs both parts; percona: Percona's code
+       alone.
+     For oracle and both, also say whether a later upstream release already
+     changed that code (`git -C $SOURCE_DIR log --oneline <tag>..<latest
+     mysql-X.Y.Z tag of the same series> -- <path>`; fetch the `mysql` remote's
+     tags if they are missing), and name the release and commit that fixed it.
    - related: <other C ids, or "none">
    - disputes: any reviewer whose "Checked and correct" list contradicts the finding,
      or "none"
@@ -89,7 +106,9 @@ needs no worktree.
    findings last, under "## Rejected", keeping their C ids.
 5. Add "## Fix plan": for each confirmed or partly-confirmed finding, where its fix
    belongs: fold it into the commit that introduced it, or a new commit for
-   pre-existing defects, and the test that should catch it.
+   pre-existing defects, and the test that should catch it. For an oracle
+   defect, say whether to take upstream's fix (when a later release has one),
+   patch it in Percona, or report it to Oracle (bugs.mysql.com) as well.
 6. End with a coverage table: rows are the files or hunks changed in the range plus
    every area a finding names, and a last row with each model's test run and pass
    counts; columns are models; each cell says found (C<n>) / checked-ok /
