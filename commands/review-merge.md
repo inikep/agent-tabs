@@ -6,6 +6,7 @@ REVIEW_COMBINED=<report path>       # merged report, e.g. /data/sh/LLM/reviews/P
 Default variables (used unless the caller sets them):
 SOURCE_DIR=$PWD                     # git checkout with the reviewed target
 PROMPT_DIR=<the directory of this file>  # where environment.md is
+CVSS_SKILL_DIR=~/.claude/skills/oracle-cvss-scoring  # the oracle-cvss-scoring skill
 
 
 If a required variable is missing, stop and ask for it.
@@ -31,6 +32,43 @@ needs no worktree.
    - severity: the highest reported, plus a one-line reason if the reviewers disagree
    - merge_severity: your own assessment after checking, with a reason if it differs
      from severity
+   - cvss: the CVSS v3.1 base vector, score and rating of the defect as you
+     assess it after checking, e.g. `CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H
+     6.5 (Medium)`, and a one-line reason for each metric that isn't obvious.
+     Compute the score with the v3.1 base formula (roundup to one decimal) and
+     check it against the published examples for that vector if you are unsure.
+     Score what an attacker or a faulty client can actually do at TARGET:
+     - AV:N when an SQL client or a replication/router peer can trigger it,
+       AV:L when it needs a shell on the host, a config file or a crafted data
+       file.
+     - PR:N before authentication, PR:L for any authenticated user, PR:H when
+       it needs SUPER, SYSTEM_VARIABLES_ADMIN, INSTALL COMPONENT or a similar
+       admin privilege; UI:R only when someone else must run something.
+     - A:H for a server crash or hang, A:L for a failed statement or session;
+       I:H for data loss or wrong results that are stored, I:L for wrong
+       results or status shown to the client; C when data the user may not
+       read is exposed.
+     - S:C only when the impact reaches beyond the server process, e.g. the OS
+       or another server.
+     A finding with no confidentiality, integrity or availability impact (test
+     gaps, messages, extra work, nits) is `CVSS:3.1/…/C:N/I:N/A:N 0.0 (None)`.
+     A rejected finding gets `cvss: n/a`.
+     Score `cvss` for every finding before you read the skill below, so this
+     score is your own and not anchored on it.
+   - cvss_oracle: a second CVSS v3.1 base score, made with the
+     oracle-cvss-scoring skill: the way Oracle scores MySQL in its Critical
+     Patch Updates. Claude can load the skill by name; any other model reads
+     $CVSS_SKILL_DIR/SKILL.md (the rules table) and
+     $CVSS_SKILL_DIR/scoring_brief.md (the rules as applied). Use only their
+     scoring rules: score from the finding and your checks, not from a Jira
+     ticket, and don't post comments, change priorities or look anything up
+     on the web. Compute the score with
+     `python3 $CVSS_SKILL_DIR/cvss_tool.py calc <vector>` instead of by hand.
+     Give the vector, score and rating, the Oracle-style component (InnoDB,
+     Server: Optimizer, Server: Replication, Client: mysqldump, …) and, for
+     each metric that differs from `cvss`, the skill's rule that changes it,
+     e.g. `PR:H (needs a table of its own)`. A rejected finding gets
+     `cvss_oracle: n/a`.
    - verification: the strongest reported (reproduced > code-read > suspected), or
      your own if you reproduced it
    - origin / commit / at_base: as in review.md; if reviewers disagree, or a reviewer
@@ -46,7 +84,8 @@ needs no worktree.
    path can refute a code-read finding). Mark it confirmed, partly-confirmed (say
    which part holds), rejected (with the reason and evidence), or unverified. Don't
    drop anything silently.
-4. Order findings by merge_severity, then by number of reporters. Put rejected
+4. Order findings by merge_severity, then by the `cvss` score, then by
+   number of reporters. Put rejected
    findings last, under "## Rejected", keeping their C ids.
 5. Add "## Fix plan": for each confirmed or partly-confirmed finding, where its fix
    belongs: fold it into the commit that introduced it, or a new commit for
