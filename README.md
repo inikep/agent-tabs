@@ -372,10 +372,11 @@ Check if all issues from $REVIEW_COMBINED were fixed in $TARGET
 repository's [`commands/`](commands/), found through the path agent-tabs
 was built from (`dir` under `[commands]` in the config overrides it). A
 template is an ordinary prompt or a script whose values come from the
-command's arguments and from the config. There are four so far,
+command's arguments and from the config. There are five so far,
 [`commands/plan.txt`](commands/plan.txt),
 [`commands/plan-full.txt`](commands/plan-full.txt) and
-[`commands/implement.txt`](commands/implement.txt) (below), and
+[`commands/implement.txt`](commands/implement.txt) (below),
+[`commands/review.txt`](commands/review.txt) (read-only, below) and
 [`commands/review-full.txt`](commands/review-full.txt):
 
 ```text
@@ -440,6 +441,16 @@ working in parallel, are in
 [`commands/environment.md`](commands/environment.md), which every step of
 `/review-full` and `/implement` names before its own prompt; each prompt adds its
 own rules, such as which branch its worktree is on.
+
+`/review BASE..TARGET [NOTES...]` is the simplified, read-only version.
+Every model reviews the range only by reading it with git in `$SOURCE_DIR`,
+following [`commands/review.md`](commands/review.md): no worktree, fetch,
+build or tests, so its findings are `code-read` or `suspected`. The
+coordinator merges them with `review-merge.md`, told to stay read-only too.
+Its reports are `read-review-$MODEL_ID.md` and
+`read-review2-combined-$MODEL_ID.md` in the same `$REVIEW_DIR`, so they
+don't mix with `/review-full`'s `review-*.md`. A bare `/review` still goes to
+the harnesses' own `/review`.
 
 Words after the range are notes for the models, put on the `$NOTES` lines
 after the instructions, e.g. `/review-full percona/8.4..PS-1 Don't build.

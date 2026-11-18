@@ -537,6 +537,38 @@ mod tests {
     }
 
     #[test]
+    fn the_read_only_review_keeps_its_files_apart_from_the_full_review() {
+        const READ: &str = include_str!("../commands/review.txt");
+        let (text, added) = fill(READ, "review", &["inikep/8.4..PS-2-8.4"], &config())
+            .unwrap()
+            .unwrap();
+        assert_eq!(added, 4);
+        let steps = parse(&text, &["opus-5.5", "gpt-6"]).unwrap().unwrap();
+        assert_eq!(steps.len(), 4);
+        let Command::Send { targets, text } = &steps[0].command else {
+            panic!("{steps:?}");
+        };
+        assert_eq!(targets, &Targets::All);
+        assert!(text.ends_with("Read instructions from $PROMPT_DIR/review.md"), "{text}");
+        assert!(!text.contains("environment.md"), "{text}");
+        assert_eq!(
+            steps[1].command.path(Some("GPT-6-high")).unwrap(),
+            "/r/PS-2-8.4/read-review-GPT-6-high.md"
+        );
+        assert_eq!(steps[2].line, "::send opus-5.5");
+        let Command::Send { text, .. } = &steps[2].command else {
+            panic!("{steps:?}");
+        };
+        assert!(text.contains("REVIEW_FILES=$REVIEW_DIR/read-review-*.md"), "{text}");
+        assert!(text.contains("This merge is read-only"), "{text}");
+        assert_eq!(
+            steps[3].command.path(Some("Opus-5.5-high")).unwrap(),
+            "/r/PS-2-8.4/read-review2-combined-Opus-5.5-high.md"
+        );
+        assert!(CommandsConfig::default().dir().join("review.md").exists());
+    }
+
+    #[test]
     fn named_arguments_override_the_config() {
         let text = fill_review(&["a..b", "REVIEW_DIR=/tmp/x"])
             .unwrap()
@@ -921,6 +953,7 @@ mod tests {
                 "/implement BASE_BRANCH PLAN [NOTES...]",
                 "/plan TARGET TASK...",
                 "/plan-full TARGET TASK...",
+                "/review BASE..TARGET [NOTES...]",
                 "/review-full BASE..TARGET [NOTES...]"
             ]
         );

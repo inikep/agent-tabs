@@ -1641,8 +1641,9 @@ impl App {
             ),
             Line::from("in the main tab Ctrl+S skips the wait it is on and Ctrl+X cancels it."),
             Line::from(
-                "/review-full BASE..TARGET: every model reviews BASE..TARGET, then one merges the reviews.",
+                "/review BASE..TARGET: every model reviews BASE..TARGET by reading it, then one merges the reviews;",
             ),
+            Line::from("/review-full also builds and runs tests."),
             Line::from(
                 "Rounds and the script are saved; after a restart Ctrl+G resumes a paused script.",
             ),

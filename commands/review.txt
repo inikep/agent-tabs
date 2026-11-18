@@ -1,0 +1,31 @@
+::# /review BASE..TARGET [NOTES...]: every checked model reviews BASE..TARGET by reading the code,
+::# without a worktree, build or tests, then the coordinator merges the reviews the same way.
+::# /review-full also builds and runs tests. NOTES go to every model after the instructions.
+::# REVIEW_DIR comes from [commands.variables] in the config, COORDINATOR from [commands]
+::# coordinator, and review.md and review-merge.md sit next to this file.
+::#
+::# The models read from SOURCE_DIR, the git checkout with TARGET, by default the directory
+::# agent-tabs runs in. SOURCE_DIR=/path before NOTES changes it.
+::#
+::# Example: /review percona/8.4..PS-11925-8.4-bump_libkmip
+::#
+::# Example: /review percona/8.4..PS-11925-8.4-bump_libkmip extra/libkmip is already checked
+::args BASE..TARGET [NOTES...]
+
+::# Every checked model reviews the branch into its own file
+::send all
+OUTPUT_FILE=$REVIEW_DIR/read-review-$MODEL_ID.md
+Read instructions from $PROMPT_DIR/review.md
+$NOTES
+::wait-model-files $OUTPUT_FILE
+
+::# The coordinator merges the reviews
+::send $COORDINATOR
+REVIEW_FILES=$REVIEW_DIR/read-review-*.md
+REVIEW_COMBINED=$REVIEW_DIR/read-review2-combined-$MODEL_ID.md
+REVIEW_RANKING=$REVIEW_DIR/read-review2-ranking-$MODEL_ID.md
+Read instructions from $PROMPT_DIR/review-merge.md
+This merge is read-only, like the reviews ($PROMPT_DIR/review.md): check findings by reading the code at TARGET and BASE with git in SOURCE_DIR; don't create a worktree, fetch, build or run tests. Ignore the environment rules review-merge.md refers to.
+Rank reviews and write to $REVIEW_RANKING with duration.
+$NOTES
+::wait-model-files $REVIEW_COMBINED

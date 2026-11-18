@@ -14,7 +14,8 @@ If a required variable is missing, stop and ask for it.
 Merge the reviews in $REVIEW_FILES into $REVIEW_COMBINED. All reports must
 review the same range: check that their target and base SHAs match and stop if
 they don't. Below, TARGET means the target in the reports' front matter.
-The reports follow the format in review-full.md, and so does this one where it applies.
+The reports follow the format in review-full.md (review.md for a read-only review,
+with the same fields), and so does this one where it applies.
 
 Environment: follow $PROMPT_DIR/environment.md. To check a finding by running
 something, use your own worktree and build dir, with the worktree detached at
