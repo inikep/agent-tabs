@@ -80,6 +80,8 @@ pub struct App {
     main_folded: Vec<bool>,
     main_hits: Vec<Option<usize>>,
     main_area: Rect,
+    /// Whether the intro shows each command's description, after `/help`.
+    intro_help: bool,
     main_rows: Vec<String>,
     main_selection: Option<((usize, u16), (usize, u16))>,
     drag: Option<Drag>,
@@ -202,6 +204,54 @@ fn styled_line(prefix: &str, cells: crate::rounds::Cells) -> Line<'static> {
 /// few milliseconds, so a file written right after `since` may look older.
 fn written_since(modified: SystemTime, since: SystemTime) -> bool {
     modified + Duration::from_millis(500) >= since
+}
+
+/// The intro's logo, one glyph per letter of "agent-tabs", three rows high.
+const LOGO: [[&str; 3]; 10] = [
+    ["█▀▀█", "█▀▀█", "▀  ▀"],
+    ["█▀▀▀", "█ ▀█", "▀▀▀▀"],
+    ["█▀▀", "█▀▀", "▀▀▀"],
+    ["█▀▀▄", "█  █", "▀  ▀"],
+    ["▀█▀", " █ ", " ▀ "],
+    ["  ", "▀▀", "  "],
+    ["▀█▀", " █ ", " ▀ "],
+    ["█▀▀█", "█▀▀█", "▀  ▀"],
+    ["█▀▀▄", "█▀▀▄", "▀▀▀ "],
+    ["█▀▀▀", "▀▀▀█", "▀▀▀▀"],
+];
+
+/// Each glyph's color: cyan through violet to pink.
+const LOGO_COLORS: [Color; 10] = [
+    Color::Rgb(34, 211, 238),
+    Color::Rgb(56, 189, 248),
+    Color::Rgb(96, 165, 250),
+    Color::Rgb(129, 140, 248),
+    Color::Rgb(167, 139, 250),
+    Color::Rgb(148, 163, 184),
+    Color::Rgb(192, 132, 252),
+    Color::Rgb(232, 121, 249),
+    Color::Rgb(244, 114, 182),
+    Color::Rgb(251, 113, 133),
+];
+
+/// The logo's width in columns, glyphs one column apart.
+fn logo_width() -> usize {
+    LOGO.iter().map(|g| g[0].chars().count()).sum::<usize>() + LOGO.len() - 1
+}
+
+fn logo_lines() -> Vec<Line<'static>> {
+    (0..3)
+        .map(|row| {
+            let mut spans = Vec::new();
+            for (i, (glyph, color)) in LOGO.iter().zip(LOGO_COLORS).enumerate() {
+                if i > 0 {
+                    spans.push(Span::raw(" "));
+                }
+                spans.push(Span::styled(glyph[row], Style::default().fg(color).bold()));
+            }
+            Line::from(spans)
+        })
+        .collect()
 }
 
 /// `names` without repeats, in order.
@@ -486,6 +536,7 @@ impl App {
             main_folded: Vec::new(),
             main_hits: Vec::new(),
             main_area: Rect::default(),
+            intro_help: false,
             main_rows: Vec::new(),
             main_selection: None,
             drag: None,
@@ -1645,6 +1696,7 @@ impl App {
                 "A prompt with ::send, ::wait-model-files, ::wait-file or ::wait-done lines runs as a script;",
             ),
             Line::from("in the main tab Ctrl+S skips the wait it is on and Ctrl+X cancels it."),
+            Line::from("/help in the main tab lists the commands and what each does."),
             Line::from(
                 "/review BASE..TARGET: every model reviews BASE..TARGET by reading it, then one merges the reviews;",
             ),
@@ -2709,7 +2761,11 @@ impl App {
                 ComposerAction::Submit { text, targets } => {
                     // The prompt joined the history, which is saved.
                     self.state_dirty = true;
-                    if self.submit(&text, &targets) {
+                    if text.trim() == "/help" {
+                        self.view_round(self.rounds.len());
+                        self.intro_help = true;
+                        self.main_scroll = 0;
+                    } else if self.submit(&text, &targets) {
                         self.main_scroll = 0;
                     } else {
                         self.main_input.insert_str(&text);
@@ -2727,6 +2783,9 @@ impl App {
     }
 
     fn view_round(&mut self, index: usize) {
+        if index != self.main_view {
+            self.intro_help = false;
+        }
         if index != self.main_view || self.main_folded.len() != self.main_sections() {
             self.main_view = index;
             self.main_scroll = 0;
@@ -2898,10 +2957,24 @@ impl App {
         }
     }
 
-    /// The main tab without a round: what to do, and the command templates.
+    /// The main tab without a round: the logo, what to do, and the command
+    /// templates, with their descriptions after `/help`.
     fn intro_lines(&self) -> Vec<Line<'static>> {
         let rounds = self.rounds.len();
-        let mut lines = vec![
+        let mut lines = Vec::new();
+        // Only when it fits; wrapped, it would be unreadable.
+        if self.main_area.width as usize >= logo_width() {
+            lines.extend(logo_lines());
+            lines.push(
+                Line::from(format!(
+                    "v{} · claude, codex, agy, cursor-agent and opencode side by side",
+                    env!("CARGO_PKG_VERSION")
+                ))
+                .dark_gray(),
+            );
+            lines.push(Line::from(""));
+        }
+        lines.extend([
             Line::from(match rounds {
                 0 => "No rounds yet.".to_string(),
                 1 => "1 round so far; Ctrl+P shows it.".to_string(),
@@ -2934,7 +3007,7 @@ impl App {
             Line::from("Ctrl+\\ ? shows every key.").dark_gray(),
             Line::from(""),
             Line::from("Commands").bold(),
-        ];
+        ]);
         let mut cache = self.templates.borrow_mut();
         // Read again now and then, so a new or edited template shows up.
         if cache
@@ -2949,6 +3022,14 @@ impl App {
                 "  No templates in {}.",
                 self.config.commands.dir().display()
             )));
+        }
+        if !self.intro_help {
+            for template in templates {
+                lines.push(Line::from(format!("  {}", template.usage)).bold());
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from("/help shows what each command does.").dark_gray());
+            return lines;
         }
         for template in templates {
             lines.push(Line::from(""));
@@ -3114,6 +3195,8 @@ impl App {
         let input_height = Self::prompt_box_height(&input, area);
         let [view_area, input_area] =
             Layout::vertical([Constraint::Min(3), Constraint::Length(input_height)]).areas(area);
+        // The intro needs the width to decide whether the logo fits.
+        self.main_area = view_area;
         let mut rows = Vec::new();
         let mut hits = Vec::new();
         for (line, section) in self.main_lines() {
@@ -3125,7 +3208,6 @@ impl App {
         let max_scroll = rows.len().saturating_sub(view_area.height as usize) as u16;
         self.main_scroll = self.main_scroll.min(max_scroll);
         self.main_hits = hits;
-        self.main_area = view_area;
         self.main_rows = rows.iter().map(|l| l.to_string()).collect();
         frame.render_widget(
             Paragraph::new(rows).scroll((self.main_scroll, 0)),
@@ -4696,11 +4778,56 @@ mod tests {
         assert!(text.contains("  /plan TARGET TASK..."), "{text}");
         assert!(text.contains("  /plan-full TARGET TASK..."), "{text}");
         assert!(
-            text.contains("    Every checked model reviews BASE..TARGET"),
-            "the usage isn't repeated: {text}"
+            !text.contains("Every checked model"),
+            "descriptions wait for /help: {text}"
+        );
+        assert!(
+            text.contains("/help shows what each command does"),
+            "{text}"
         );
         app.handle_event(key(KeyCode::Char('r'), KeyModifiers::CONTROL));
         wait_main(&mut app, "SUMMARY:2");
+    }
+
+    #[test]
+    fn help_shows_what_each_command_does() {
+        let mut app = app_with(vec![cat_harness("a"), cat_harness("b")]);
+        thread::sleep(Duration::from_millis(200));
+        submit_in_main(&mut app, "first");
+        assert_eq!(app.rounds.len(), 1);
+        submit_in_main(&mut app, "/help");
+        assert_eq!(app.main_input.text(), "");
+        assert_eq!(app.rounds.len(), 1, "/help isn't sent to the harnesses");
+        let text = main_text(&app);
+        assert!(
+            text.contains("    Every checked model reviews BASE..TARGET"),
+            "the usage isn't repeated: {text}"
+        );
+        assert!(!text.contains("/help shows what"), "{text}");
+        // Back to a round and to the intro again: descriptions are hidden.
+        app.handle_event(key(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        app.handle_event(key(KeyCode::Char('n'), KeyModifiers::CONTROL));
+        assert!(!main_text(&app).contains("Every checked model"));
+        thread::sleep(Duration::from_millis(200));
+        assert!(!screen(app.pane(0)).contains("/help"));
+    }
+
+    #[test]
+    fn the_intro_shows_the_logo_when_it_fits() {
+        let mut app = app_with(vec![cat_harness("a")]);
+        app.select(app.main_tab());
+        let wide = buffer_rows(&draw_app(&mut app, 100, 30));
+        let logo = wide
+            .iter()
+            .position(|r| r.contains("█▀▀█ █▀▀▀ █▀▀"))
+            .unwrap();
+        assert!(wide[logo + 3].contains("side by side"), "{wide:#?}");
+        let narrow = buffer_rows(&draw_app(&mut app, 40, 30));
+        assert!(narrow.iter().all(|r| !r.contains('█')), "{narrow:#?}");
+        assert!(
+            narrow.iter().any(|r| r.contains("No rounds yet")),
+            "{narrow:#?}"
+        );
     }
 
     #[test]

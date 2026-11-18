@@ -148,9 +148,11 @@ to `scrollback` lines of history.
 ## Main tab
 
 The first tab is the `main` tab (`Alt+1`), and agent-tabs starts on it,
-showing what to do and every [command template](#command-templates) with
-its description. That intro is also where `Ctrl+N` goes past the last
-round, and `Ctrl+P` goes from it to the last round.
+showing its logo (when the tab is at least 46 columns wide), what to do and
+the usage of every [command template](#command-templates). `/help` in the
+main tab's prompt box shows the intro with each command's description; it
+isn't sent to the harnesses. That intro is also where `Ctrl+N` goes past
+the last round, and `Ctrl+P` goes from it to the last round.
 The harness tabs follow in config order (`Alt+2` is the first harness).
 Whenever you send a prompt to two or more harnesses, agent-tabs starts a
 *round*:
@@ -502,7 +504,8 @@ and only the prompts it points to use `SOURCE_DIR`.
 - `/NAME` without arguments, when its template has an `::args` line, is
   sent to the harnesses as it is, so a harness command of the same name
   still works. So is `/NAME` without a template, e.g. claude's and codex's
-  `/review`.
+  `/review`, except `/help` in the main tab, which shows the commands; a
+  harness's own `/help` still works in its tab.
 
 `/plan TARGET TASK...` has every checked model plan the task in
 `$PLAN_DIR/plan-$MODEL_ID.md` (`PLAN_DIR = "/work/LLM-plans/$TARGET"` under
