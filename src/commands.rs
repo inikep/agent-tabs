@@ -9,7 +9,7 @@
 //! Review the commits in $BASE..$TARGET into $REVIEW_DIR.
 //! ```
 //!
-//! `/review percona/8.4..PS-2` then sends it with `BASE=percona/8.4`,
+//! `/review-full percona/8.4..PS-2` then sends it with `BASE=percona/8.4`,
 //! `TARGET=PS-2` and the config's `[commands.variables]` at the top.
 
 use std::collections::HashSet;
@@ -154,7 +154,7 @@ fn is_command(line: &str, name: &str) -> bool {
 /// A template as the main tab lists it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Template {
-    /// `/NAME` and its `::args`, e.g. `/review BASE..TARGET [NOTES...]`.
+    /// `/NAME` and its `::args`, e.g. `/review-full BASE..TARGET [NOTES...]`.
     pub usage: String,
     /// The `::#` lines it starts with, without the `::#`.
     pub description: Vec<String>,
@@ -363,7 +363,7 @@ fn fill(
             set.push((var.clone(), value.clone()));
         }
     }
-    // The prompts the templates point to, such as review.md, sit next to them.
+    // The prompts the templates point to, such as review-full.md, sit next to them.
     let uses = |var: &str| {
         lines
             .iter()
@@ -466,7 +466,7 @@ mod tests {
     use super::*;
     use crate::script::{Command, Targets, parse};
 
-    const REVIEW: &str = include_str!("../commands/review.txt");
+    const REVIEW: &str = include_str!("../commands/review-full.txt");
 
     fn config() -> CommandsConfig {
         with_variables(&[("REVIEW_DIR", "/r/$TARGET"), ("PROMPT_DIR", "/p")])
@@ -483,7 +483,7 @@ mod tests {
     }
 
     fn fill_review(args: &[&str]) -> Result<Option<String>, String> {
-        fill(REVIEW, "review", args, &config()).map(|t| t.map(|(text, _)| text))
+        fill(REVIEW, "review-full", args, &config()).map(|t| t.map(|(text, _)| text))
     }
 
     #[test]
@@ -492,12 +492,12 @@ mod tests {
             dir: Some("/t".into()),
             ..with_variables(&[("REVIEW_DIR", "/r")])
         };
-        let (text, _) = fill(REVIEW, "review", &["a..b"], &config).unwrap().unwrap();
+        let (text, _) = fill(REVIEW, "review-full", &["a..b"], &config).unwrap().unwrap();
         assert!(
             text.starts_with("BASE=a\nTARGET=b\nREVIEW_DIR=/r\nPROMPT_DIR=/t\n::#"),
             "{text}"
         );
-        assert!(CommandsConfig::default().dir().join("review.md").exists());
+        assert!(CommandsConfig::default().dir().join("review-full.md").exists());
         assert!(
             CommandsConfig::default()
                 .dir()
@@ -510,7 +510,7 @@ mod tests {
 
     #[test]
     fn the_review_template_takes_a_range_and_the_config_variables() {
-        let (text, added) = fill(REVIEW, "review", &["inikep/8.4..PS-2-8.4"], &config())
+        let (text, added) = fill(REVIEW, "review-full", &["inikep/8.4..PS-2-8.4"], &config())
             .unwrap()
             .unwrap();
         assert_eq!(added, 4);
@@ -523,7 +523,7 @@ mod tests {
         assert_eq!(targets, &Targets::All);
         assert_eq!(
             text,
-            "BASE=inikep/8.4\nTARGET=PS-2-8.4\nREVIEW_DIR=/r/$TARGET\nPROMPT_DIR=/p\nOUTPUT_FILE=$REVIEW_DIR/review-$MODEL_ID.md\nRead environment rules from $PROMPT_DIR/environment.md\nRead instructions from $PROMPT_DIR/review.md"
+            "BASE=inikep/8.4\nTARGET=PS-2-8.4\nREVIEW_DIR=/r/$TARGET\nPROMPT_DIR=/p\nOUTPUT_FILE=$REVIEW_DIR/review-$MODEL_ID.md\nRead environment rules from $PROMPT_DIR/environment.md\nRead instructions from $PROMPT_DIR/review-full.md"
         );
         assert_eq!(
             steps[1].command.path(Some("GPT-6-high")).unwrap(),
@@ -570,7 +570,7 @@ mod tests {
             coordinator: "gpt-6".into(),
             ..config()
         };
-        let (text, _) = fill(REVIEW, "review", &["a..b"], &config).unwrap().unwrap();
+        let (text, _) = fill(REVIEW, "review-full", &["a..b"], &config).unwrap().unwrap();
         assert_eq!(script(&text), "::send gpt-6");
         assert!(!text.contains("COORDINATOR="), "{text}");
         let text = fill_review(&["a..b", "COORDINATOR=gpt-6"])
@@ -774,7 +774,7 @@ mod tests {
         let sends = steps(&text);
         assert!(
             sends[0].ends_with(
-                "Read instructions from $PROMPT_DIR/review.md\nDon't build. extra/libkmip is checked"
+                "Read instructions from $PROMPT_DIR/review-full.md\nDon't build. extra/libkmip is checked"
             ),
             "{}",
             sends[0]
@@ -788,7 +788,7 @@ mod tests {
 
         let text = fill_review(&["a..b"]).unwrap().unwrap();
         let sends = steps(&text);
-        assert!(sends[0].ends_with("$PROMPT_DIR/review.md"), "{}", sends[0]);
+        assert!(sends[0].ends_with("$PROMPT_DIR/review-full.md"), "{}", sends[0]);
         assert!(
             !text.contains("NOTES=") && !text.contains("$NOTES"),
             "{text}"
@@ -802,7 +802,7 @@ mod tests {
         assert_eq!(
             fill_review(&["a"]),
             Err(
-                "a isn't BASE..TARGET; usage: /review BASE..TARGET [NOTES...] [NAME=value…]".into()
+                "a isn't BASE..TARGET; usage: /review-full BASE..TARGET [NOTES...] [NAME=value…]".into()
             )
         );
     }
@@ -825,13 +825,13 @@ mod tests {
 
     #[test]
     fn reports_unset_variables() {
-        let err = fill(REVIEW, "review", &["a..b"], &with_variables(&[])).unwrap_err();
+        let err = fill(REVIEW, "review-full", &["a..b"], &with_variables(&[])).unwrap_err();
         assert!(
             err.starts_with("line 16: $REVIEW_DIR is not set; set it under [commands.variables]"),
             "{err}"
         );
         let vars = with_variables(&[("REVIEW_DIR", "$NO_ROOT_X/$TARGET")]);
-        let err = fill(REVIEW, "review", &["a..b", "PROMPT_DIR=/p"], &vars).unwrap_err();
+        let err = fill(REVIEW, "review-full", &["a..b", "PROMPT_DIR=/p"], &vars).unwrap_err();
         assert!(
             err.starts_with("REVIEW_DIR=$NO_ROOT_X/$TARGET uses $NO_ROOT_X, which is not set"),
             "{err}"
@@ -840,7 +840,7 @@ mod tests {
 
     #[test]
     fn reports_wrong_arguments_and_templates() {
-        let usage = "usage: /review BASE..TARGET [NOTES...] [NAME=value…]";
+        let usage = "usage: /review-full BASE..TARGET [NOTES...] [NAME=value…]";
         assert_eq!(fill_review(&["REVIEW_DIR=/x"]), Err(usage.into()));
         assert_eq!(
             fill(
@@ -870,17 +870,17 @@ mod tests {
     #[test]
     fn errors_name_the_template_line() {
         let expanded = Expanded {
-            path: "/c/review.txt".into(),
+            path: "/c/review-full.txt".into(),
             text: String::new(),
             added: 4,
         };
         assert_eq!(
             expanded.error("line 16: unknown target x"),
-            "/c/review.txt: line 12: unknown target x"
+            "/c/review-full.txt: line 12: unknown target x"
         );
         assert_eq!(
             expanded.error("the prompt only sets variables"),
-            "/c/review.txt: the prompt only sets variables"
+            "/c/review-full.txt: the prompt only sets variables"
         );
     }
 
@@ -905,7 +905,7 @@ mod tests {
             err.ends_with("hi.txt: usage: /hi WHO [NAME=value…]"),
             "{err}"
         );
-        assert!(CommandsConfig::default().dir().join("review.txt").exists());
+        assert!(CommandsConfig::default().dir().join("review-full.txt").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -921,13 +921,13 @@ mod tests {
                 "/implement BASE_BRANCH PLAN [NOTES...]",
                 "/plan TARGET TASK...",
                 "/plan-full TARGET TASK...",
-                "/review BASE..TARGET [NOTES...]"
+                "/review-full BASE..TARGET [NOTES...]"
             ]
         );
-        let review = describe("review", REVIEW);
+        let review = describe("review-full", REVIEW);
         assert!(
             review.description[0]
-                .starts_with("/review BASE..TARGET [NOTES...]: every checked model"),
+                .starts_with("/review-full BASE..TARGET [NOTES...]: every checked model"),
             "{review:?}"
         );
         assert_eq!(review.description.len(), 11);

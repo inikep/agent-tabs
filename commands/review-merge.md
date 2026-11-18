@@ -14,11 +14,11 @@ If a required variable is missing, stop and ask for it.
 Merge the reviews in $REVIEW_FILES into $REVIEW_COMBINED. All reports must
 review the same range: check that their target and base SHAs match and stop if
 they don't. Below, TARGET means the target in the reports' front matter.
-The reports follow the format in review.md, and so does this one where it applies.
+The reports follow the format in review-full.md, and so does this one where it applies.
 
 Environment: follow $PROMPT_DIR/environment.md. To check a finding by running
 something, use your own worktree and build dir, with the worktree detached at
-TARGET as review.md says. Reading code with `git -C $SOURCE_DIR show TARGET:path`
+TARGET as review-full.md says. Reading code with `git -C $SOURCE_DIR show TARGET:path`
 needs no worktree.
 
 1. Group findings that have the same root cause: an overlapping location and the same
@@ -71,7 +71,7 @@ needs no worktree.
      `cvss_oracle: n/a`.
    - verification: the strongest reported (reproduced > code-read > suspected), or
      your own if you reproduced it
-   - origin / commit / at_base: as in review.md; if reviewers disagree, or a reviewer
+   - origin / commit / at_base: as in review-full.md; if reviewers disagree, or a reviewer
      says "introduced" without showing BASE's behaviour, settle it (run the scenario
      at BASE if you can) and say how
    - author: oracle | percona | both — who wrote the defective code, decided

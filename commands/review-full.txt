@@ -1,21 +1,21 @@
-::# /review BASE..TARGET [NOTES...]: every checked model reviews BASE..TARGET, the coordinator
+::# /review-full BASE..TARGET [NOTES...]: every checked model reviews BASE..TARGET, the coordinator
 ::# merges the reviews. NOTES, e.g. "Don't build. extra/libkmip is already checked", go to every
 ::# model after the instructions. REVIEW_DIR comes from [commands.variables] in the config,
-::# COORDINATOR from [commands] coordinator, and review.md and review-merge.md sit next to this file.
+::# COORDINATOR from [commands] coordinator, and review-full.md and review-merge.md sit next to this file.
 ::#
 ::# The models work from SOURCE_DIR, the git checkout with TARGET, by default the directory
 ::# agent-tabs runs in. SOURCE_DIR=/path before NOTES changes it.
 ::#
-::# Example: /review percona/8.4..PS-11925-8.4-bump_libkmip
+::# Example: /review-full percona/8.4..PS-11925-8.4-bump_libkmip
 ::#
-::# Example: /review percona/8.4..PS-11925-8.4-bump_libkmip Don't build. extra/libkmip is already checked
+::# Example: /review-full percona/8.4..PS-11925-8.4-bump_libkmip Don't build. extra/libkmip is already checked
 ::args BASE..TARGET [NOTES...]
 
 ::# Every checked model reviews the branch into its own file
 ::send all
 OUTPUT_FILE=$REVIEW_DIR/review-$MODEL_ID.md
 Read environment rules from $PROMPT_DIR/environment.md
-Read instructions from $PROMPT_DIR/review.md
+Read instructions from $PROMPT_DIR/review-full.md
 $NOTES
 ::wait-model-files $OUTPUT_FILE
 

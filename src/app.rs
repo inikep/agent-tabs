@@ -1641,7 +1641,7 @@ impl App {
             ),
             Line::from("in the main tab Ctrl+S skips the wait it is on and Ctrl+X cancels it."),
             Line::from(
-                "/review BASE..TARGET: every model reviews BASE..TARGET, then one merges the reviews.",
+                "/review-full BASE..TARGET: every model reviews BASE..TARGET, then one merges the reviews.",
             ),
             Line::from(
                 "Rounds and the script are saved; after a restart Ctrl+G resumes a paused script.",
@@ -4352,7 +4352,7 @@ mod tests {
         let mut app = app_with(vec![cat_harness("opus-5.5"), cat_harness("b")]);
         app.config.commands.variables = test_review_variables();
         thread::sleep(Duration::from_millis(200));
-        submit_in_main(&mut app, "/review percona/8.4..PS-1");
+        submit_in_main(&mut app, "/review-full percona/8.4..PS-1");
         assert_eq!(app.main_input.text(), "");
         let text = main_text(&app);
         assert!(text.contains("✓ ::send all"), "{text}");
@@ -4360,7 +4360,7 @@ mod tests {
         assert!(text.contains("::send opus-5.5"), "{text}");
         tick_until(&mut app, "the prompt", |a| {
             let screen = screen(a.pane(1));
-            screen.contains("TARGET=PS-1") && screen.contains("$PROMPT_DIR/review.md")
+            screen.contains("TARGET=PS-1") && screen.contains("$PROMPT_DIR/review-full.md")
         });
     }
 
@@ -4368,20 +4368,20 @@ mod tests {
     fn a_template_mistake_names_the_template() {
         let mut app = app_with(vec![cat_harness("a"), cat_harness("b")]);
         app.config.commands.variables = test_review_variables();
-        submit_in_main(&mut app, "/review percona/8.4..PS-1");
-        assert_eq!(app.main_input.text(), "/review percona/8.4..PS-1");
+        submit_in_main(&mut app, "/review-full percona/8.4..PS-1");
+        assert_eq!(app.main_input.text(), "/review-full percona/8.4..PS-1");
         let message = &app.message.as_ref().unwrap().0;
         assert!(
-            message.contains("commands/review.txt: line 23: unknown target opus-5.5"),
+            message.contains("commands/review-full.txt: line 23: unknown target opus-5.5"),
             "{message}"
         );
 
         app.config.commands.variables.clear();
         app.main_input.clear();
-        submit_in_main(&mut app, "/review percona/8.4..PS-1");
+        submit_in_main(&mut app, "/review-full percona/8.4..PS-1");
         let message = &app.message.as_ref().unwrap().0;
         assert!(
-            message.contains("commands/review.txt: line 16: $REVIEW_DIR is not set"),
+            message.contains("commands/review-full.txt: line 16: $REVIEW_DIR is not set"),
             "{message}"
         );
     }
@@ -4620,7 +4620,7 @@ mod tests {
         assert!(app.on_main());
         let text = main_text(&app);
         assert!(text.contains("No rounds yet"), "{text}");
-        assert!(text.contains("  /review BASE..TARGET [NOTES...]"), "{text}");
+        assert!(text.contains("  /review-full BASE..TARGET [NOTES...]"), "{text}");
         assert!(text.contains("  /plan TARGET TASK..."), "{text}");
         assert!(text.contains("  /plan-full TARGET TASK..."), "{text}");
         assert!(

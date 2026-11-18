@@ -262,7 +262,7 @@ BASE=inikep/8.4
 TARGET=PS-11934-8.4-H08
 REVIEW_DIR=/data/sh/LLM/reviews/$TARGET
 OUTPUT_FILE=$REVIEW_DIR/review-$MODEL_ID.md
-Read instructions from /work/review/agent-tabs/commands/review.md; the values above replace its placeholders.
+Read instructions from /work/review/agent-tabs/commands/review-full.md; the values above replace its placeholders.
 ```
 
 agent-tabs works out each harness's file the way a shell would: `$NAME` and
@@ -302,7 +302,7 @@ REVIEW_DIR=/data/sh/LLM/reviews/$TARGET
 ::send all
 BASE=inikep/8.4
 OUTPUT_FILE=$REVIEW_DIR/review-$MODEL_ID.md
-Read instructions from /work/review/agent-tabs/commands/review.md
+Read instructions from /work/review/agent-tabs/commands/review-full.md
 
 ::wait-model-files $OUTPUT_FILE
 
@@ -350,7 +350,7 @@ Check if all issues from $REVIEW_COMBINED were fixed in $TARGET
   `Ctrl+X` cancels the script; prompts already sent keep running.
 - A script is one round in the main tab. Its first `::send` starts the
   round, and each later one adds a section per target, after the earlier
-  ones, so `/review` shows every model's review and then the merge. The
+  ones, so `/review-full` shows every model's review and then the merge. The
   sections are named by step, e.g. `opus-5.5 · step 2`, and each is taken
   from its own step's prompt and report file. A prompt you send while a
   script runs gets its own round and doesn't supersede the script's. The
@@ -376,27 +376,27 @@ command's arguments and from the config. There are four so far,
 [`commands/plan.txt`](commands/plan.txt),
 [`commands/plan-full.txt`](commands/plan-full.txt) and
 [`commands/implement.txt`](commands/implement.txt) (below), and
-[`commands/review.txt`](commands/review.txt):
+[`commands/review-full.txt`](commands/review-full.txt):
 
 ```text
-::# /review BASE..TARGET [NOTES...]: every checked model reviews BASE..TARGET, the coordinator
+::# /review-full BASE..TARGET [NOTES...]: every checked model reviews BASE..TARGET, the coordinator
 ::# merges the reviews. NOTES, e.g. "Don't build. extra/libkmip is already checked", go to every
 ::# model after the instructions. REVIEW_DIR comes from [commands.variables] in the config,
-::# COORDINATOR from [commands] coordinator, and review.md and review-merge.md sit next to this file.
+::# COORDINATOR from [commands] coordinator, and review-full.md and review-merge.md sit next to this file.
 ::#
 ::# The models work from SOURCE_DIR, the git checkout with TARGET, by default the directory
 ::# agent-tabs runs in. SOURCE_DIR=/path before NOTES changes it.
 ::#
-::# Example: /review percona/8.4..PS-11925-8.4-bump_libkmip
+::# Example: /review-full percona/8.4..PS-11925-8.4-bump_libkmip
 ::#
-::# Example: /review percona/8.4..PS-11925-8.4-bump_libkmip Don't build. extra/libkmip is already checked
+::# Example: /review-full percona/8.4..PS-11925-8.4-bump_libkmip Don't build. extra/libkmip is already checked
 ::args BASE..TARGET [NOTES...]
 
 ::# Every checked model reviews the branch into its own file
 ::send all
 OUTPUT_FILE=$REVIEW_DIR/review-$MODEL_ID.md
 Read environment rules from $PROMPT_DIR/environment.md
-Read instructions from $PROMPT_DIR/review.md
+Read instructions from $PROMPT_DIR/review-full.md
 $NOTES
 ::wait-model-files $OUTPUT_FILE
 
@@ -420,7 +420,7 @@ coordinator = "opus-5.5"   # the default
 REVIEW_DIR = "/work/LLM-reviews/$TARGET"
 ```
 
-`/review percona/8.4..PS-11925-8.4-bump_libkmip` then runs the template
+`/review-full percona/8.4..PS-11925-8.4-bump_libkmip` then runs the template
 with these lines on top, which the script shares with every prompt it
 sends:
 
@@ -431,18 +431,18 @@ REVIEW_DIR=/work/LLM-reviews/$TARGET
 PROMPT_DIR=/work/review/agent-tabs/commands
 ```
 
-The prompts the templates point to, `review.md`, `review-merge.md`,
+The prompts the templates point to, `review-full.md`, `review-merge.md`,
 `implement.md`, `implement-compare.md` and `implement-improve.md`, are in
 `commands/` too: `$PROMPT_DIR` is that directory
 unless the config or an argument sets it. The rules they share, the worktree
 and build dir next to `$SOURCE_DIR`, the cmake options, the job limit, MTR and
 working in parallel, are in
 [`commands/environment.md`](commands/environment.md), which every step of
-`/review` and `/implement` names before its own prompt; each prompt adds its
+`/review-full` and `/implement` names before its own prompt; each prompt adds its
 own rules, such as which branch its worktree is on.
 
 Words after the range are notes for the models, put on the `$NOTES` lines
-after the instructions, e.g. `/review percona/8.4..PS-1 Don't build.
+after the instructions, e.g. `/review-full percona/8.4..PS-1 Don't build.
 extra/libkmip is already checked` (quotes around the notes are optional).
 Without notes, those lines are left out.
 
@@ -452,7 +452,7 @@ and never change it. It defaults to `$PWD` in each of those
 prompts, which is the directory agent-tabs
 runs in (or `--cwd DIR`). To use another checkout, add `SOURCE_DIR=/path`
 to the command, before any notes, since everything from the first note on
-is part of the notes: `/review percona/8.4..PS-1
+is part of the notes: `/review-full percona/8.4..PS-1
 SOURCE_DIR=/work/mysql-server/percona-8.4 Don't build`. It can't be set
 under `[commands.variables]`: a template gets only the variables it uses,
 and only the prompts it points to use `SOURCE_DIR`.
@@ -467,12 +467,12 @@ and only the prompts it points to use `SOURCE_DIR`.
   config, is replaced by its value, or by nothing when it's empty, and a
   variable used only that way isn't put on top.
 - Arguments written as `NAME=value` set or override any variable, e.g.
-  `/review percona/8.4..PS-1 REVIEW_DIR=/tmp/reviews`. An argument whose
+  `/review-full percona/8.4..PS-1 REVIEW_DIR=/tmp/reviews`. An argument whose
   word is a plain name can be given that way too, in any order:
   `/implement PLAN=/x.md BASE_BRANCH=PS-1-trunk`.
 - `$COORDINATOR` is the harness that coordinates the others, here the one
   that merges the reviews: `coordinator` under `[commands]`, `opus-5.5` by
-  default, or `COORDINATOR=gpt-6` after `/review` for one run. Since the
+  default, or `COORDINATOR=gpt-6` after `/review-full` for one run. Since the
   script takes harness names as written, agent-tabs fills in variables in
   `::send` and `::wait-done` lines itself.
 - `[commands.variables]` come after the arguments, in the order written,
@@ -489,8 +489,9 @@ and only the prompts it points to use `SOURCE_DIR`.
   template, such as a `::send` to a harness your config doesn't have, is
   reported with the file and line when you use it, and nothing is sent.
 - `/NAME` without arguments, when its template has an `::args` line, is
-  sent to the harnesses as it is, so their own commands (claude's and
-  codex's `/review`) still work. So is `/NAME` without a template.
+  sent to the harnesses as it is, so a harness command of the same name
+  still works. So is `/NAME` without a template, e.g. claude's and codex's
+  `/review`.
 
 `/plan TARGET TASK...` has every checked model plan the task in
 `$PLAN_DIR/plan-$MODEL_ID.md` (`PLAN_DIR = "/work/LLM-plans/$TARGET"` under
