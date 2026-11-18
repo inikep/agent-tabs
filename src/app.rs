@@ -1250,6 +1250,11 @@ impl App {
         let mode = pane.mode();
         let col = mouse.column + 1;
         let row = mouse.row;
+        if mode.intersects(TermMode::MOUSE_MODE | TermMode::ALT_SCREEN) {
+            // The harness scrolls its own screen, so the selection would
+            // stay on the same cells while the text under it moves.
+            pane.clear_selection();
+        }
         if mode.intersects(TermMode::MOUSE_MODE) {
             let button = if up { 64 } else { 65 };
             if mode.contains(TermMode::SGR_MOUSE) {
@@ -3632,6 +3637,37 @@ mod tests {
             app.pane(0).selection_text().is_none(),
             "a plain click clears the selection"
         );
+    }
+
+    #[test]
+    fn the_wheel_drops_a_full_screen_harness_selection() {
+        // claude and codex draw on the alternate screen and scroll it
+        // themselves, so a kept selection would mark whatever moves under it.
+        let mut app = app_with(vec![script_harness(
+            "full",
+            "printf '\\033[?1049halpha beta\\r\\ngamma delta'; sleep 5",
+        )]);
+        wait_for(app.pane(0), "gamma delta");
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 6, 1);
+        mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), 2, 2);
+        mouse(&mut app, MouseEventKind::Up(MouseButton::Left), 2, 2);
+        assert_eq!(app.clipboard.last.as_deref(), Some("beta\ngam"));
+        mouse(&mut app, MouseEventKind::ScrollUp, 5, 2);
+        assert!(app.pane(0).selection_text().is_none());
+
+        // In an inline harness's own scrollback the selection moves with the
+        // text, so it stays.
+        let mut app = app_with(vec![script_harness(
+            "inline",
+            "for i in $(seq 1 40); do printf 'line %s\\r\\n' $i; done; sleep 5",
+        )]);
+        wait_for(app.pane(0), "line 40");
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 0, 2);
+        mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), 3, 3);
+        mouse(&mut app, MouseEventKind::Up(MouseButton::Left), 3, 3);
+        let copied = app.clipboard.last.clone().unwrap();
+        mouse(&mut app, MouseEventKind::ScrollUp, 5, 5);
+        assert_eq!(app.pane(0).selection_text(), Some(copied));
     }
 
     #[test]
