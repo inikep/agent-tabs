@@ -492,12 +492,19 @@ mod tests {
             dir: Some("/t".into()),
             ..with_variables(&[("REVIEW_DIR", "/r")])
         };
-        let (text, _) = fill(REVIEW, "review-full", &["a..b"], &config).unwrap().unwrap();
+        let (text, _) = fill(REVIEW, "review-full", &["a..b"], &config)
+            .unwrap()
+            .unwrap();
         assert!(
             text.starts_with("BASE=a\nTARGET=b\nREVIEW_DIR=/r\nPROMPT_DIR=/t\n::#"),
             "{text}"
         );
-        assert!(CommandsConfig::default().dir().join("review-full.md").exists());
+        assert!(
+            CommandsConfig::default()
+                .dir()
+                .join("review-full.md")
+                .exists()
+        );
         assert!(
             CommandsConfig::default()
                 .dir()
@@ -549,7 +556,10 @@ mod tests {
             panic!("{steps:?}");
         };
         assert_eq!(targets, &Targets::All);
-        assert!(text.ends_with("Read instructions from $PROMPT_DIR/review.md"), "{text}");
+        assert!(
+            text.ends_with("Read instructions from $PROMPT_DIR/review.md"),
+            "{text}"
+        );
         assert!(!text.contains("environment.md"), "{text}");
         assert_eq!(
             steps[1].command.path(Some("GPT-6-high")).unwrap(),
@@ -559,7 +569,10 @@ mod tests {
         let Command::Send { text, .. } = &steps[2].command else {
             panic!("{steps:?}");
         };
-        assert!(text.contains("REVIEW_FILES=$REVIEW_DIR/read-review-*.md"), "{text}");
+        assert!(
+            text.contains("REVIEW_FILES=$REVIEW_DIR/read-review-*.md"),
+            "{text}"
+        );
         assert!(text.contains("This merge is read-only"), "{text}");
         assert_eq!(
             steps[3].command.path(Some("Opus-5.5-high")).unwrap(),
@@ -602,7 +615,9 @@ mod tests {
             coordinator: "gpt-6".into(),
             ..config()
         };
-        let (text, _) = fill(REVIEW, "review-full", &["a..b"], &config).unwrap().unwrap();
+        let (text, _) = fill(REVIEW, "review-full", &["a..b"], &config)
+            .unwrap()
+            .unwrap();
         assert_eq!(script(&text), "::send gpt-6");
         assert!(!text.contains("COORDINATOR="), "{text}");
         let text = fill_review(&["a..b", "COORDINATOR=gpt-6"])
@@ -820,7 +835,11 @@ mod tests {
 
         let text = fill_review(&["a..b"]).unwrap().unwrap();
         let sends = steps(&text);
-        assert!(sends[0].ends_with("$PROMPT_DIR/review-full.md"), "{}", sends[0]);
+        assert!(
+            sends[0].ends_with("$PROMPT_DIR/review-full.md"),
+            "{}",
+            sends[0]
+        );
         assert!(
             !text.contains("NOTES=") && !text.contains("$NOTES"),
             "{text}"
@@ -834,7 +853,8 @@ mod tests {
         assert_eq!(
             fill_review(&["a"]),
             Err(
-                "a isn't BASE..TARGET; usage: /review-full BASE..TARGET [NOTES...] [NAME=value…]".into()
+                "a isn't BASE..TARGET; usage: /review-full BASE..TARGET [NOTES...] [NAME=value…]"
+                    .into()
             )
         );
     }
@@ -937,7 +957,12 @@ mod tests {
             err.ends_with("hi.txt: usage: /hi WHO [NAME=value…]"),
             "{err}"
         );
-        assert!(CommandsConfig::default().dir().join("review-full.txt").exists());
+        assert!(
+            CommandsConfig::default()
+                .dir()
+                .join("review-full.txt")
+                .exists()
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

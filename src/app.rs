@@ -2178,14 +2178,20 @@ impl App {
     }
 
     /// Saves to `path` from now on, and first restores from it unless
-    /// `restore` is false.
+    /// `restore` is false. The main prompt box's history is restored either
+    /// way.
     pub fn use_state_file(&mut self, path: PathBuf, restore: bool) {
-        if restore {
-            match crate::state::load(&path) {
-                Ok(Some(saved)) => self.restore(saved),
-                Ok(None) => {}
-                Err(err) => self.flash_error(format!("not restored: {err:#}")),
+        match crate::state::load(&path) {
+            Ok(Some(mut saved)) => {
+                self.main_input
+                    .set_history(std::mem::take(&mut saved.history));
+                if restore {
+                    self.restore(saved);
+                }
             }
+            Ok(None) => {}
+            Err(err) if restore => self.flash_error(format!("not restored: {err:#}")),
+            Err(_) => {}
         }
         self.state_path = Some(path);
         self.state_dirty = true;
@@ -2199,7 +2205,7 @@ impl App {
         };
         let rounds = self.rounds.iter().map(|r| self.saved_round(r)).collect();
         let run = self.run.as_ref().map(|r| self.saved_run(r));
-        if let Err(err) = crate::state::save(&path, rounds, run) {
+        if let Err(err) = crate::state::save(&path, rounds, run, self.main_input.history()) {
             self.flash_error(format!("could not save state: {err:#}"));
         }
     }
@@ -2696,6 +2702,8 @@ impl App {
                 ComposerAction::None => {}
                 ComposerAction::Cancel => self.main_input.clear(),
                 ComposerAction::Submit { text, targets } => {
+                    // The prompt joined the history, which is saved.
+                    self.state_dirty = true;
                     if self.submit(&text, &targets) {
                         self.main_scroll = 0;
                     } else {
@@ -4366,6 +4374,30 @@ mod tests {
     }
 
     #[test]
+    fn the_main_prompt_history_survives_a_restart() {
+        let dir = std::env::temp_dir().join(format!("agent-tabs-history-{}", std::process::id()));
+        let state = dir.join("state.json");
+        let mut first = app_with(vec![cat_harness("a")]);
+        first.use_state_file(state.clone(), true);
+        thread::sleep(Duration::from_millis(200));
+        submit_in_main(&mut first, "first prompt");
+        submit_in_main(&mut first, "second prompt");
+        first.save_state();
+        drop(first);
+
+        // Even without restoring the rounds.
+        let mut second = app_with(vec![cat_harness("a")]);
+        second.use_state_file(state.clone(), false);
+        assert!(second.rounds.is_empty());
+        second.select(second.main_tab());
+        second.handle_event(key(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(second.main_input.text(), "second prompt");
+        second.handle_event(key(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(second.main_input.text(), "first prompt");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn a_template_mistake_names_the_template() {
         let mut app = app_with(vec![cat_harness("a"), cat_harness("b")]);
         app.config.commands.variables = test_review_variables();
@@ -4621,7 +4653,10 @@ mod tests {
         assert!(app.on_main());
         let text = main_text(&app);
         assert!(text.contains("No rounds yet"), "{text}");
-        assert!(text.contains("  /review-full BASE..TARGET [NOTES...]"), "{text}");
+        assert!(
+            text.contains("  /review-full BASE..TARGET [NOTES...]"),
+            "{text}"
+        );
         assert!(text.contains("  /plan TARGET TASK..."), "{text}");
         assert!(text.contains("  /plan-full TARGET TASK..."), "{text}");
         assert!(

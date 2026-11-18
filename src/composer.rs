@@ -41,6 +41,16 @@ impl Composer {
         &self.text
     }
 
+    /// Sent prompts, oldest first.
+    pub fn history(&self) -> &[String] {
+        &self.history
+    }
+
+    pub fn set_history(&mut self, history: Vec<String>) {
+        self.history = history;
+        self.history_pos = None;
+    }
+
     pub fn selected(&self) -> Vec<usize> {
         self.targets
             .iter()
@@ -386,6 +396,18 @@ mod tests {
         assert_eq!(c.text(), "second");
         press(&mut c, KeyCode::Down, KeyModifiers::NONE);
         assert_eq!(c.text(), "");
+    }
+
+    #[test]
+    fn set_history_is_recalled_newest_first() {
+        let mut c = Composer::new(1);
+        c.open(&[0]);
+        c.set_history(vec!["old".into(), "new".into()]);
+        press(&mut c, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(c.text(), "new");
+        press(&mut c, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(c.text(), "old");
+        assert_eq!(c.history(), ["old", "new"]);
     }
 
     #[test]

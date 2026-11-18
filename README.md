@@ -586,6 +586,9 @@ when it exits, and restores them when it is started again in the same
 directory. `--no-restore` starts without them; the state is still saved from
 then on.
 
+The main tab's prompt box keeps its last 200 prompts in the same file, so
+`↑` recalls prompts sent before a restart, even with `--no-restore`.
+
 The harnesses come back as new sessions, so what they were doing is gone:
 
 - The main tab starts on its intro; `Ctrl+P` shows the last round.

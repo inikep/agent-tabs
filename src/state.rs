@@ -1,5 +1,6 @@
-//! Rounds and the script, saved so that they survive a restart of
-//! agent-tabs. One state file per working directory.
+//! Rounds, the script and the main prompt box's history, saved so that
+//! they survive a restart of agent-tabs. One state file per working
+//! directory.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -14,11 +15,17 @@ use crate::script::Step;
 
 const VERSION: u32 = 1;
 
+/// How many of the main prompt box's last prompts are saved.
+pub const HISTORY_LIMIT: usize = 200;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Saved {
     pub version: u32,
     pub rounds: Vec<SavedRound>,
     pub run: Option<SavedRun>,
+    /// The main prompt box's sent prompts, oldest first; none in older files.
+    #[serde(default)]
+    pub history: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -123,11 +130,18 @@ pub fn load(path: &Path) -> Result<Option<Saved>> {
 
 /// Writes the state to a temporary file and renames it into place, so a
 /// crash never leaves half a file.
-pub fn save(path: &Path, rounds: Vec<SavedRound>, run: Option<SavedRun>) -> Result<()> {
+pub fn save(
+    path: &Path,
+    rounds: Vec<SavedRound>,
+    run: Option<SavedRun>,
+    history: &[String],
+) -> Result<()> {
+    let history = history[history.len().saturating_sub(HISTORY_LIMIT)..].to_vec();
     let saved = Saved {
         version: VERSION,
         rounds,
         run,
+        history,
     };
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -169,9 +183,17 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("agent-tabs-state-{}", std::process::id()));
         let path = dir.join("state.json");
         assert!(load(&path).unwrap().is_none());
-        save(&path, Vec::new(), None).unwrap();
+        save(&path, Vec::new(), None, &["a".into(), "b".into()]).unwrap();
         let saved = load(&path).unwrap().unwrap();
         assert!(saved.rounds.is_empty() && saved.run.is_none());
+        assert_eq!(saved.history, ["a", "b"]);
+        let many: Vec<String> = (0..HISTORY_LIMIT + 5).map(|i| i.to_string()).collect();
+        save(&path, Vec::new(), None, &many).unwrap();
+        let saved = load(&path).unwrap().unwrap();
+        assert_eq!(saved.history.len(), HISTORY_LIMIT);
+        assert_eq!(saved.history[0], "5", "the oldest are dropped");
+        std::fs::write(&path, r#"{"version":1,"rounds":[],"run":null}"#).unwrap();
+        assert!(load(&path).unwrap().unwrap().history.is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
