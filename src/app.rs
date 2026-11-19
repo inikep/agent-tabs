@@ -15,7 +15,7 @@ use ratatui::crossterm::event::{
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListState, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 use unicode_width::UnicodeWidthStr;
 
@@ -74,8 +74,9 @@ pub struct App {
     /// The round the main tab shows; `rounds.len()` shows the intro, with
     /// the command templates.
     main_view: usize,
-    /// The command templates the intro lists, and when they were read.
-    templates: std::cell::RefCell<Option<(Instant, Vec<crate::commands::Template>)>>,
+    templates: crate::commands::TemplateCache,
+    /// Visible command rows and the index of the first row, for mouse selection.
+    command_rows: std::cell::Cell<Option<(Rect, usize)>>,
     main_focus: usize,
     main_folded: Vec<bool>,
     main_hits: Vec<Option<usize>>,
@@ -551,7 +552,8 @@ impl App {
             model_patterns: Vec::new(),
             target_hits: std::cell::RefCell::new(Vec::new()),
             prompt_widths: std::cell::RefCell::new(std::collections::HashMap::new()),
-            templates: std::cell::RefCell::new(None),
+            templates: Default::default(),
+            command_rows: Default::default(),
             exit_span: (0, 0),
             quit: false,
             run: None,
@@ -1042,9 +1044,33 @@ impl App {
         }
     }
 
+    fn on_command_key(&mut self, kind: PromptBox, key: &KeyEvent) -> bool {
+        if !key.modifiers.is_empty()
+            || !matches!(
+                key.code,
+                KeyCode::Up | KeyCode::Down | KeyCode::Esc | KeyCode::Tab | KeyCode::Enter
+            )
+        {
+            return false;
+        }
+        let composer = match kind {
+            PromptBox::Main => &mut self.main_input,
+            PromptBox::Composer => &mut self.composer,
+        };
+        let Some(prefix) = composer.command_prefix() else {
+            return false;
+        };
+        let templates = self.templates.get(&self.config.commands);
+        let matches = Composer::matching_commands(prefix, &templates, kind == PromptBox::Main);
+        composer.handle_command_key(key, &matches)
+    }
+
     fn on_compose_key(&mut self, key: KeyEvent) {
         if is_prefix(&key) {
             self.mode = Mode::Normal;
+            return;
+        }
+        if self.on_command_key(PromptBox::Composer, &key) {
             return;
         }
         let width = self
@@ -1248,6 +1274,18 @@ impl App {
             }
             return;
         }
+        if left_down
+            && let Some((rows, first)) = self.command_rows.get()
+            && rows.contains(Position::new(mouse.column, mouse.row))
+        {
+            let index = first + usize::from(mouse.row - rows.y);
+            match self.mode {
+                Mode::Compose => self.composer.select_command(index),
+                Mode::Normal if self.on_main() => self.main_input.select_command(index),
+                _ => {}
+            }
+            return;
+        }
         if left_down && let Some(hit) = self.target_hit(mouse.column, mouse.row) {
             match hit.kind {
                 PromptBox::Composer => self.composer.toggle(hit.target),
@@ -1352,6 +1390,9 @@ impl App {
     }
 
     fn draw(&mut self, frame: &mut Frame) {
+        if !(self.mode == Mode::Compose || (self.mode == Mode::Normal && self.on_main())) {
+            self.command_rows.set(None);
+        }
         let area = frame.area();
         let [tabs_area, pane_area, status_area] = Layout::vertical([
             Constraint::Length(1),
@@ -1653,9 +1694,51 @@ impl App {
         frame.render_widget(Clear, area);
         frame.render_widget(Paragraph::new(shown).block(block), area);
 
+        if kind == PromptBox::Composer || self.mode == Mode::Normal {
+            self.draw_command_popup(frame, area, composer, kind);
+        }
+
         let x = (inner.x + cursor_x as u16).min(inner.right().saturating_sub(1));
         let y = inner.y + (cursor_row - first) as u16;
         Some(Position::new(x, y))
+    }
+
+    fn draw_command_popup(
+        &self,
+        frame: &mut Frame,
+        prompt: Rect,
+        composer: &Composer,
+        kind: PromptBox,
+    ) {
+        let previous = self.command_rows.take();
+        let Some(prefix) = composer.command_prefix() else {
+            return;
+        };
+        let templates = self.templates.get(&self.config.commands);
+        let matches = Composer::matching_commands(prefix, &templates, kind == PromptBox::Main);
+        // Leave the tab bar visible, even in a short terminal.
+        let height = matches.len().min(8) as u16;
+        let height = height.min(prompt.y.saturating_sub(frame.area().y + 1));
+        if height == 0 {
+            return;
+        }
+        let area = Rect::new(prompt.x, prompt.y - height, prompt.width, height);
+        let mut state = ListState::default()
+            .with_offset(previous.map_or(0, |(_, first)| first))
+            .with_selected(Some(composer.command_index(&matches)));
+        let rows = matches.iter().map(|t| {
+            Line::from(vec![
+                Span::raw(t.usage.as_str()).bold(),
+                Span::raw("  "),
+                Span::raw(t.summary()),
+            ])
+        });
+        let list = List::new(rows)
+            .highlight_symbol("› ")
+            .highlight_style(Style::default().reversed());
+        frame.render_widget(Clear, area);
+        frame.render_stateful_widget(list, area, &mut state);
+        self.command_rows.set(Some((area, state.offset())));
     }
 
     fn draw_help(&self, frame: &mut Frame, pane_area: Rect) {
@@ -1682,6 +1765,8 @@ impl App {
             Line::from("Prompt composer:").bold(),
             Line::from("  Enter send · Alt+Enter / Ctrl+J newline · Alt+1-9 toggle target"),
             Line::from("  Ctrl+A toggle all · ↑/↓ history · Esc cancel"),
+            Line::from("  / lists matching commands · ↑/↓ choose · Tab completes · Esc closes"),
+            Line::from("  Enter completes commands with arguments and runs those without."),
             Line::from(""),
             Line::from(
                 "Tab markers: ● output · ⚑ trust the folder · ⧗ prompt queued · ? waiting for your answer · ✗ exited",
@@ -2718,6 +2803,9 @@ impl App {
     }
 
     fn on_main_key(&mut self, key: KeyEvent) {
+        if self.on_command_key(PromptBox::Main, &key) {
+            return;
+        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let page = self.pane_size.rows / 2;
         let sections = self.main_sections();
@@ -3008,15 +3096,7 @@ impl App {
             Line::from(""),
             Line::from("Commands").bold(),
         ]);
-        let mut cache = self.templates.borrow_mut();
-        // Read again now and then, so a new or edited template shows up.
-        if cache
-            .as_ref()
-            .is_none_or(|(at, _)| at.elapsed() >= Duration::from_secs(2))
-        {
-            *cache = Some((Instant::now(), crate::commands::list(&self.config.commands)));
-        }
-        let templates = &cache.as_ref().expect("filled above").1;
+        let templates = self.templates.get(&self.config.commands);
         if templates.is_empty() {
             lines.push(Line::from(format!(
                 "  No templates in {}.",
@@ -3024,24 +3104,20 @@ impl App {
             )));
         }
         if !self.intro_help {
-            for template in templates {
+            for template in templates.iter() {
                 lines.push(Line::from(format!("  {}", template.usage)).bold());
             }
             lines.push(Line::from(""));
             lines.push(Line::from("/help shows what each command does.").dark_gray());
             return lines;
         }
-        for template in templates {
+        for template in templates.iter() {
             lines.push(Line::from(""));
             lines.push(Line::from(format!("  {}", template.usage)).bold());
             // One paragraph per run of comment lines, wrapped to the tab;
             // the first usually repeats the usage before its ": ".
             let text = template.description.join("\n");
-            let text = text
-                .strip_prefix(&template.usage)
-                .and_then(|rest| rest.strip_prefix(':'))
-                .unwrap_or(&text);
-            for paragraph in text.split("\n\n") {
+            for paragraph in template.without_usage(&text).split("\n\n") {
                 let paragraph = paragraph.split_whitespace().collect::<Vec<_>>().join(" ");
                 let mut chars = paragraph.chars();
                 if let Some(first) = chars.next() {
@@ -4787,6 +4863,77 @@ mod tests {
         );
         app.handle_event(key(KeyCode::Char('r'), KeyModifiers::CONTROL));
         wait_main(&mut app, "SUMMARY:2");
+    }
+
+    #[test]
+    fn main_command_popup_completes_before_tab_moves_focus_and_preserves_history() {
+        let mut app = app_with(vec![cat_harness("a"), cat_harness("b")]);
+        submit_in_main(&mut app, "first round");
+        assert!(app.main_sections() > 0);
+        type_text(&mut app, "/rev");
+        let rows = buffer_rows(&draw_app(&mut app, 90, 20));
+        let prompt = rows.iter().position(|r| r.contains("Prompt →")).unwrap();
+        assert!(
+            rows[prompt - 2].starts_with("› /review BASE..TARGET [NOTES...]  every checked model")
+        );
+        assert!(rows[prompt - 1].starts_with("  /review-full "));
+        app.handle_event(key(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_event(key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.main_input.text(), "/review-full ");
+        assert_eq!(app.main_focus, 0);
+        app.handle_event(key(KeyCode::Esc, KeyModifiers::NONE));
+
+        type_text(&mut app, "/h");
+        app.handle_event(key(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.main_input.text(), "/h");
+        app.handle_event(key(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.main_input.text(), "");
+        type_text(&mut app, "/h");
+        app.handle_event(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.intro_help);
+        app.handle_event(key(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.main_input.text(), "/help");
+        draw_app(&mut app, 90, 20);
+        assert!(app.command_rows.get().is_none());
+        app.handle_event(key(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.main_input.text(), "first round");
+    }
+
+    #[test]
+    fn harness_command_popup_scrolls_and_click_selects_the_visible_row() {
+        let mut app = app_with(vec![cat_harness("a")]);
+        let dir = std::env::temp_dir().join(format!("agent-tabs-popup-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..10 {
+            std::fs::write(dir.join(format!("item{i}.txt")), format!("say {i}")).unwrap();
+        }
+        app.config.commands.dir = Some(dir.clone());
+        app.select(0);
+        app.open_composer(false);
+        app.handle_event(Event::Paste("/".into()));
+        let rows = buffer_rows(&draw_app(&mut app, 60, 16));
+        assert!(rows.iter().any(|r| r.starts_with("› /item0")));
+        assert!(
+            !rows
+                .iter()
+                .any(|r| r.contains("/help") || r.contains("/item8"))
+        );
+        app.handle_event(key(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Compose);
+        assert_eq!(app.composer.text(), "/");
+        type_text(&mut app, "it");
+        for _ in 0..9 {
+            app.handle_event(key(KeyCode::Down, KeyModifiers::NONE));
+        }
+        let rows = buffer_rows(&draw_app(&mut app, 60, 16));
+        assert!(rows.iter().any(|r| r.starts_with("› /item9")));
+        assert!(!rows.iter().any(|r| r.contains("/item1")));
+        let y = rows.iter().position(|r| r.contains("/item4")).unwrap() as u16;
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 3, y);
+        app.handle_event(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.composer.history(), ["/item4"]);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

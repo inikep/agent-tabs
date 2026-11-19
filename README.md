@@ -83,6 +83,12 @@ In the prompt composer:
 | `Ctrl+U` / `Ctrl+K` / `Ctrl+W` | Delete to line start / line end / previous word |
 | `Esc` | Cancel |
 
+In either prompt box, type `/` to list commands and keep typing to filter by
+name. Use `↑` / `↓` or click a row to select a command. `Tab` fills in its
+name. `Enter` leaves a space for arguments if the command takes them, or runs
+it immediately if it takes none. `Esc` closes the list and keeps your text.
+The main prompt box also lists `/help`.
+
 A harness with `enabled = false` in the config is not started with
 agent-tabs and has no tab. It is still listed, unchecked, in the prompt boxes
 (the main tab's and `Ctrl+\` `a`). Check it there, by clicking its name or

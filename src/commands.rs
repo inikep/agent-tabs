@@ -12,8 +12,10 @@
 //! `/review-full percona/8.4..PS-2` then sends it with `BASE=percona/8.4`,
 //! `TARGET=PS-2` and the config's `[commands.variables]` at the top.
 
+use std::cell::{Ref, RefCell};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -158,6 +160,48 @@ pub struct Template {
     pub usage: String,
     /// The `::#` lines it starts with, without the `::#`.
     pub description: Vec<String>,
+}
+
+impl Template {
+    pub fn name(&self) -> &str {
+        self.usage.split_whitespace().next().unwrap_or_default()
+    }
+
+    pub fn without_usage<'a>(&self, description: &'a str) -> &'a str {
+        description
+            .strip_prefix(&self.usage)
+            .and_then(|rest| rest.strip_prefix(':'))
+            .unwrap_or(description)
+    }
+
+    pub fn summary(&self) -> &str {
+        self.description
+            .iter()
+            .find_map(|line| {
+                let summary = self.without_usage(line.trim()).trim();
+                (!summary.is_empty()).then_some(summary)
+            })
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Default)]
+pub struct TemplateCache(RefCell<Option<(Instant, Vec<Template>)>>);
+
+impl TemplateCache {
+    pub fn get(&self, config: &CommandsConfig) -> Ref<'_, [Template]> {
+        if self
+            .0
+            .borrow()
+            .as_ref()
+            .is_none_or(|(at, _)| at.elapsed() >= Duration::from_secs(2))
+        {
+            self.0.replace(Some((Instant::now(), list(config))));
+        }
+        Ref::map(self.0.borrow(), |entry| {
+            entry.as_ref().unwrap().1.as_slice()
+        })
+    }
 }
 
 /// The templates in the commands directory, by name; empty if there is

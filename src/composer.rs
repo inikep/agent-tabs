@@ -1,5 +1,12 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+use crate::commands::Template;
+
+static HELP: std::sync::LazyLock<Template> = std::sync::LazyLock::new(|| Template {
+    usage: "/help".into(),
+    description: vec!["Show what each command does.".into()],
+});
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum ComposerAction {
     None,
@@ -14,6 +21,8 @@ pub struct Composer {
     pub targets: Vec<bool>,
     history: Vec<String>,
     history_pos: Option<usize>,
+    // None after dismissing the popup, completing a name, or recalling history.
+    command_selection: Option<usize>,
 }
 
 impl Composer {
@@ -24,6 +33,7 @@ impl Composer {
             targets: vec![false; count],
             history: Vec::new(),
             history_pos: None,
+            command_selection: Some(0),
         }
     }
 
@@ -35,6 +45,7 @@ impl Composer {
             }
         }
         self.history_pos = None;
+        self.command_selection = Some(0);
     }
 
     pub fn text(&self) -> &str {
@@ -67,6 +78,7 @@ impl Composer {
     }
 
     pub fn clear(&mut self) {
+        self.command_selection = Some(0);
         self.text.clear();
         self.cursor = 0;
         self.history_pos = None;
@@ -79,8 +91,78 @@ impl Composer {
 
     pub fn insert_str(&mut self, s: &str) {
         let s = s.replace("\r\n", "\n").replace('\r', "\n");
+        self.command_selection = Some(0);
         self.text.insert_str(self.cursor, &s);
         self.cursor += s.len();
+    }
+
+    pub fn command_prefix(&self) -> Option<&str> {
+        self.command_selection?;
+        (self.text.starts_with('/') && !self.text.contains(char::is_whitespace))
+            .then_some(self.text())
+    }
+
+    pub fn matching_commands<'a>(
+        prefix: &str,
+        templates: &'a [Template],
+        main: bool,
+    ) -> Vec<&'a Template> {
+        let mut matches: Vec<_> = templates
+            .iter()
+            .filter(|t| t.name().starts_with(prefix) && !(main && t.usage == "/help"))
+            .collect();
+        if main && HELP.name().starts_with(prefix) {
+            let index = matches.partition_point(|t| t.name() < HELP.name());
+            matches.insert(index, &HELP);
+        }
+        matches
+    }
+
+    pub fn select_command(&mut self, index: usize) {
+        if let Some(selected) = &mut self.command_selection {
+            *selected = index;
+        }
+    }
+
+    pub fn command_index(&self, matches: &[&Template]) -> usize {
+        self.command_selection
+            .unwrap_or_default()
+            .min(matches.len().saturating_sub(1))
+    }
+
+    /// Returns false for Enter on an argument-free command so the caller
+    /// submits the completed name through the usual prompt handler.
+    pub fn handle_command_key(&mut self, key: &KeyEvent, matches: &[&Template]) -> bool {
+        let selected = self.command_index(matches);
+        let Some(command) = matches.get(selected) else {
+            return false;
+        };
+        match key.code {
+            KeyCode::Up => self.command_selection = Some(selected.saturating_sub(1)),
+            KeyCode::Down => self.command_selection = Some((selected + 1).min(matches.len() - 1)),
+            KeyCode::Esc => self.command_selection = None,
+            KeyCode::Tab | KeyCode::Enter => {
+                let name = command.name();
+                let takes_args = name != command.usage;
+                self.clear();
+                self.insert_str(name);
+                if takes_args {
+                    self.insert_str(" ");
+                }
+                self.command_selection = None;
+                return takes_args || key.code == KeyCode::Tab;
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn delete_range(&mut self, start: usize, end: usize) {
+        if start < end {
+            self.text.replace_range(start..end, "");
+            self.cursor = start;
+            self.command_selection = Some(0);
+        }
     }
 
     fn prev_boundary(&self) -> usize {
@@ -165,6 +247,7 @@ impl Composer {
             (Some(i), false) if i + 1 < self.history.len() => Some(i + 1),
             (Some(_), false) => None,
         };
+        self.command_selection = None;
         self.history_pos = next;
         self.text = next.map(|i| self.history[i].clone()).unwrap_or_default();
         self.cursor = self.text.len();
@@ -205,12 +288,11 @@ impl Composer {
             KeyCode::Char('a') if ctrl => self.toggle_all(),
             KeyCode::Char('u') if ctrl => {
                 let start = self.line_start();
-                self.text.replace_range(start..self.cursor, "");
-                self.cursor = start;
+                self.delete_range(start, self.cursor);
             }
             KeyCode::Char('k') if ctrl => {
                 let end = self.line_end();
-                self.text.replace_range(self.cursor..end, "");
+                self.delete_range(self.cursor, end);
             }
             KeyCode::Char('w') if ctrl => {
                 let before = &self.text[..self.cursor];
@@ -219,8 +301,7 @@ impl Composer {
                     .rfind(|c: char| c.is_whitespace())
                     .map(|i| i + 1)
                     .unwrap_or(0);
-                self.text.replace_range(start..self.cursor, "");
-                self.cursor = start;
+                self.delete_range(start, self.cursor);
             }
             KeyCode::Char(c) if !ctrl => {
                 let mut buf = [0u8; 4];
@@ -228,12 +309,11 @@ impl Composer {
             }
             KeyCode::Backspace if self.cursor > 0 => {
                 let prev = self.prev_boundary();
-                self.text.replace_range(prev..self.cursor, "");
-                self.cursor = prev;
+                self.delete_range(prev, self.cursor);
             }
             KeyCode::Delete if self.cursor < self.text.len() => {
                 let next = self.next_boundary();
-                self.text.replace_range(self.cursor..next, "");
+                self.delete_range(self.cursor, next);
             }
             KeyCode::Left => self.cursor = self.prev_boundary(),
             KeyCode::Right => self.cursor = self.next_boundary(),
@@ -283,6 +363,59 @@ mod tests {
         for ch in s.chars() {
             press(c, KeyCode::Char(ch), KeyModifiers::NONE);
         }
+    }
+
+    #[test]
+    fn command_filter_requires_a_single_slash_word() {
+        let mut c = Composer::new(1);
+        for text in [
+            "", "review", "see /r", " /r", "/r ", "/r\n", "/r\t", "/r\u{a0}",
+        ] {
+            c.clear();
+            c.insert_str(text);
+            assert_eq!(c.command_prefix(), None, "{text:?}");
+        }
+        let templates = crate::commands::list(&Default::default());
+        for (prefix, names) in [
+            ("/r", vec!["/review", "/review-full"]),
+            ("/rev", vec!["/review", "/review-full"]),
+            ("/review-f", vec!["/review-full"]),
+            ("/unknown", vec![]),
+        ] {
+            c.clear();
+            c.insert_str(prefix);
+            let matches =
+                Composer::matching_commands(c.command_prefix().unwrap(), &templates, false);
+            assert_eq!(matches.iter().map(|t| t.name()).collect::<Vec<_>>(), names);
+        }
+        assert_eq!(
+            Composer::matching_commands("/he", &templates, true)[0].name(),
+            "/help"
+        );
+        assert!(Composer::matching_commands("/he", &templates, false).is_empty());
+    }
+
+    #[test]
+    fn command_selection_resets_on_edit_and_completes_the_selected_name() {
+        let templates = crate::commands::list(&Default::default());
+        let mut c = Composer::new(1);
+        c.insert_str("/r");
+        let choose = |c: &mut Composer, code| {
+            let matches =
+                Composer::matching_commands(c.command_prefix().unwrap(), &templates, true);
+            c.handle_command_key(&KeyEvent::new(code, KeyModifiers::NONE), &matches)
+        };
+        assert!(choose(&mut c, KeyCode::Down));
+        c.insert_str("e");
+        assert!(choose(&mut c, KeyCode::Enter));
+        assert_eq!(c.text(), "/review ");
+        assert!(c.command_prefix().is_none());
+
+        c.clear();
+        c.insert_str("/h");
+        assert!(choose(&mut c, KeyCode::Tab));
+        assert_eq!(c.text(), "/help");
+        assert!(c.command_prefix().is_none());
     }
 
     #[test]
