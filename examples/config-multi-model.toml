@@ -1,0 +1,87 @@
+# A config running ten harnesses side by side: Claude, Codex, Antigravity,
+# OpenCode and Cursor, each with a high reasoning level and its own
+# auto-approve mode. Harnesses with `enabled = false` start only when you
+# start them from agent-tabs. Copy to ~/.config/agent-tabs/config.toml.
+
+[[harness]]
+name = "fable-5.2"
+command = "claude"
+models = ["claude-mythos-5-2", "claude-fable-5-2"]
+args = ["--effort", "high", "--permission-mode", "auto"]
+env_remove = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_CHILD_SESSION"]
+
+[[harness]]
+name = "opus-5.5"
+command = "claude"
+args = ["--model", "claude-opus-5-5", "--effort", "high", "--permission-mode", "auto"]
+env_remove = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_CHILD_SESSION"]
+
+[[harness]]
+name = "gpt-6.2-astra"
+command = "codex"
+args = ["-m", "gpt-6.2-astra", "-c", "model_reasoning_effort=\"high\"", "--approve-for-me"]
+env_remove = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_CHILD_SESSION"]
+
+[[harness]]
+name = "gemini-4-carbon"
+enabled = false
+command = "agy"
+args = ["--model", "gemini-4-carbon-high", "--mode", "auto"]
+env_remove = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_CHILD_SESSION"]
+
+[[harness]]
+name = "gemini-4-neon"
+command = "agy"
+args = ["--model", "gemini-4-neon-high", "--mode", "auto"]
+env_remove = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_CHILD_SESSION"]
+
+[[harness]]
+name = "gpt-6.2-sol"
+enabled = false
+command = "codex"
+args = ["-m", "gpt-6.2-sol", "-c", "model_reasoning_effort=\"high\"", "--approve-for-me"]
+env_remove = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_CHILD_SESSION"]
+
+[[harness]]
+name = "kimi-k3.1"
+command = "opencode"
+args = ["-m", "bedrock-openai/global.moonshotai.kimi-k3.1"]
+model = "Kimi K3.1 high"
+provider = "Bedrock"
+env_remove = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_CHILD_SESSION"]
+
+[[harness]]
+name = "muse-wonder"
+command = "cursor-agent"
+args = ["--model", "muse-wonder-1.0-high"]
+env_remove = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_CHILD_SESSION"]
+
+[[harness]]
+name = "deepseek-v4.1-flash"
+command = "cursor-agent"
+args = ["--model", "deepseek-v41-flash-1017-high"]
+model = "DeepSeek V4.1 Flash 1017 High"
+env_remove = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_CHILD_SESSION"]
+
+[[harness]]
+name = "glm-5.3"
+enabled = false
+command = "cursor-agent"
+args = ["--model", "glm-5p3-high"]
+model = "GLM 5.3 High"
+env_remove = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_CHILD_SESSION"]
+
+[[harness]]
+name = "grok-4.7"
+enabled = false
+command = "cursor-agent"
+args = ["--model", "grok-4.7-high"]
+env_remove = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_CHILD_SESSION"]
+
+[commands]
+coordinator = "opus-5.5"
+
+[commands.variables]
+REVIEW_DIR = "/work/LLM-reviews/$TARGET"
+PLAN_DIR = "/work/LLM-plans/$TARGET"
+IMPLEMENT_DIR = "/work/LLM-implementations/$BASE_BRANCH"

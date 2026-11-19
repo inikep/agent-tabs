@@ -630,6 +630,8 @@ Your terminal's own selection still works with `Shift`+drag.
 
 Optional: `~/.config/agent-tabs/config.toml`, or pass `--config FILE`.
 `agent-tabs --print-config` prints the effective configuration.
+[`examples/config-multi-model.toml`](examples/config-multi-model.toml) is a
+working config with ten harnesses across five tools.
 
 ```toml
 submit_delay_ms = 150
