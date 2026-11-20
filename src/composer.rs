@@ -2,9 +2,17 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::commands::Template;
 
-static HELP: std::sync::LazyLock<Template> = std::sync::LazyLock::new(|| Template {
-    usage: "/help".into(),
-    description: vec!["Show what each command does.".into()],
+/// The main prompt box's own commands, by name; never sent to the harnesses.
+static BUILTINS: std::sync::LazyLock<[Template; 3]> = std::sync::LazyLock::new(|| {
+    let builtin = |usage: &str, description: &str| Template {
+        usage: usage.into(),
+        description: vec![description.into()],
+    };
+    [
+        builtin("/exit", "Stop all harnesses and quit."),
+        builtin("/help", "Show what each command does."),
+        builtin("/quit", "Stop all harnesses and quit."),
+    ]
 });
 
 #[derive(Debug, PartialEq, Eq)]
@@ -107,13 +115,17 @@ impl Composer {
         templates: &'a [Template],
         main: bool,
     ) -> Vec<&'a Template> {
+        let builtin = |t: &Template| main && BUILTINS.iter().any(|b| b.usage == t.usage);
         let mut matches: Vec<_> = templates
             .iter()
-            .filter(|t| t.name().starts_with(prefix) && !(main && t.usage == "/help"))
+            .filter(|t| t.name().starts_with(prefix) && !builtin(t))
             .collect();
-        if main && HELP.name().starts_with(prefix) {
-            let index = matches.partition_point(|t| t.name() < HELP.name());
-            matches.insert(index, &HELP);
+        for b in BUILTINS
+            .iter()
+            .filter(|b| main && b.name().starts_with(prefix))
+        {
+            let index = matches.partition_point(|t| t.name() < b.name());
+            matches.insert(index, b);
         }
         matches
     }
@@ -393,6 +405,11 @@ mod tests {
             "/help"
         );
         assert!(Composer::matching_commands("/he", &templates, false).is_empty());
+        for (prefix, names) in [("/e", vec!["/exit"]), ("/q", vec!["/quit"])] {
+            let matches = Composer::matching_commands(prefix, &templates, true);
+            assert_eq!(matches.iter().map(|t| t.name()).collect::<Vec<_>>(), names);
+            assert!(Composer::matching_commands(prefix, &templates, false).is_empty());
+        }
     }
 
     #[test]

@@ -1781,7 +1781,9 @@ impl App {
                 "A prompt with ::send, ::wait-model-files, ::wait-file or ::wait-done lines runs as a script;",
             ),
             Line::from("in the main tab Ctrl+S skips the wait it is on and Ctrl+X cancels it."),
-            Line::from("/help in the main tab lists the commands and what each does."),
+            Line::from(
+                "/help in the main tab lists the commands and what each does; /exit or /quit quits.",
+            ),
             Line::from(
                 "/review BASE..TARGET: every model reviews BASE..TARGET by reading it, then one merges the reviews;",
             ),
@@ -2849,7 +2851,9 @@ impl App {
                 ComposerAction::Submit { text, targets } => {
                     // The prompt joined the history, which is saved.
                     self.state_dirty = true;
-                    if text.trim() == "/help" {
+                    if matches!(text.trim(), "/exit" | "/quit") {
+                        self.quit = true;
+                    } else if text.trim() == "/help" {
                         self.view_round(self.rounds.len());
                         self.intro_help = true;
                         self.main_scroll = 0;
@@ -3108,7 +3112,9 @@ impl App {
                 lines.push(Line::from(format!("  {}", template.usage)).bold());
             }
             lines.push(Line::from(""));
-            lines.push(Line::from("/help shows what each command does.").dark_gray());
+            lines.push(
+                Line::from("/help shows what each command does; /exit or /quit quits.").dark_gray(),
+            );
             return lines;
         }
         for template in templates.iter() {
@@ -5271,6 +5277,30 @@ mod tests {
         wait_for(app.pane(1), "got:solo");
         thread::sleep(Duration::from_millis(200));
         assert!(!screen(app.pane(0)).contains("got:solo"));
+    }
+
+    #[test]
+    fn exit_and_quit_in_the_main_box_quit_at_once() {
+        for command in ["/exit", "/quit", " /quit "] {
+            let mut app = app_with(vec![cat_harness("a"), cat_harness("b")]);
+            submit_in_main(&mut app, command);
+            assert!(app.quit, "{command}");
+            assert_eq!(app.mode(), Mode::Normal, "no confirmation: {command}");
+            assert!(
+                app.rounds.is_empty(),
+                "{command} isn't sent to the harnesses"
+            );
+        }
+        // In a harness's own prompt box it goes to the harness.
+        let mut app = app(&["a"]);
+        thread::sleep(Duration::from_millis(200));
+        app.handle_event(key(KeyCode::Char('\\'), KeyModifiers::CONTROL));
+        app.handle_event(key(KeyCode::Char('s'), KeyModifiers::NONE));
+        assert_eq!(app.mode(), Mode::Compose);
+        app.handle_event(Event::Paste("/exit".into()));
+        app.handle_event(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.quit);
+        wait_for(app.pane(0), "got:/exit");
     }
 
     #[test]
